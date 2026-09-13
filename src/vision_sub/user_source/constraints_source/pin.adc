@@ -1,0 +1,90 @@
+# ============================================================
+# pin.adc —— 视觉处理副板 M1 引脚约束
+# 顶层：src/vision_sub/user_source/hdl_source/top_vision_m1.v
+# 依据：康芯 HX4S20 使用手册扩展口引脚表（方案 v2.0 附录 A/B）
+#
+# 目标器件：安路 EG4S20BG256
+#   - 系统时钟 sys_clk  = R7  (50 MHz)
+#   - 复位     rst_n    = A2  (KEY1，按下为低)
+#   - 调试串口：F12 = uart_rx(入) / D12 = uart_tx(出)，走板载 CH340
+#   - 摄像头经转接板 P1 → 开发板扩展口 J1(GPIOA_*)
+#   - 4 个 LED = A4/A3/C10/B12
+#
+# 说明（有意为之，非遗漏）：
+#   1) 本文件是副板的独立约束，不与主板工程共用；主板工程在
+#      src/user_source/constraints_source/ 下，两者互不影响。
+#   2) 摄像头 3V3 由副板独立 LDO 供给，不占用扩展口的 VCC5V/3.3V 脚，
+#      因此这里没有任何电源相关配置。
+#   3) SCCB 的 SCL 由 FPGA 单向驱动（push-pull），SDA 为双向三态；
+#      若实物已在转接板上装了 4.7k 上拉，SDA 的 PULLTYPE 改成 NONE 即可。
+#   4) J1 第一脚在正方向"左上"，J2 第一脚在正方向"右下"，插接前务必核对。
+# ============================================================
+
+# ------------------------------------------------------------
+# 板载资源
+# ------------------------------------------------------------
+set_pin_assignment	{ sys_clk }	{ LOCATION = R7; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ rst_n }	{ LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+
+# ------------------------------------------------------------
+# 摄像头 DVP 接口（经转接板 P1 → J1）
+#   cam_pclk  J1-1  GPIOA_0  D14
+#   cam_d[0]  J1-2  GPIOA_1  G11
+#   cam_d[1]  J1-3  GPIOA_2  G12
+#   cam_d[2]  J1-4  GPIOA_3  F13
+#   cam_d[3]  J1-5  GPIOA_4  H13
+#   cam_d[4]  J1-6  GPIOA_5  H14
+#   cam_d[5]  J1-7  GPIOA_6  J14
+#   cam_d[6]  J1-8  GPIOA_7  J13
+#   cam_d[7]  J1-9  GPIOA_8  K12
+#   cam_href  J1-10 GPIOA_9  L14
+#   cam_vsync J1-13 GPIOA_10 M14
+#   cam_scl   J1-14 GPIOA_11 P11   (改造后：转接板 P1-5 TXD→SCL)
+#   cam_sda   J1-15 GPIOA_12 L10   (改造后：转接板 P1-7 RXD→SDA)
+# ------------------------------------------------------------
+set_pin_assignment	{ cam_pclk }	{ LOCATION = D14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[0] }	{ LOCATION = G11; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[1] }	{ LOCATION = G12; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[2] }	{ LOCATION = F13; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[3] }	{ LOCATION = H13; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[4] }	{ LOCATION = H14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[5] }	{ LOCATION = J14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[6] }	{ LOCATION = J13; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_d[7] }	{ LOCATION = K12; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_href }	{ LOCATION = L14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_vsync }	{ LOCATION = M14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+
+# SCCB：SCL 单向输出；SDA 双向（输入读版本、输出写配置）
+set_pin_assignment	{ cam_scl }	{ LOCATION = P11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ cam_sda }	{ LOCATION = L10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = PULLUP; }
+
+# ------------------------------------------------------------
+# 调试串口（板载 CH340，不占扩展口）
+# ------------------------------------------------------------
+set_pin_assignment	{ uart_rx }	{ LOCATION = F12; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+set_pin_assignment	{ uart_tx }	{ LOCATION = D12; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+
+# ------------------------------------------------------------
+# LED 指示
+#   led[0] = 配置序列完成   led[1] = SCCB 自检通过(cam_ok)
+#   led[2] = 0.5s 内有新帧  led[3] = 4Hz 心跳
+# ------------------------------------------------------------
+set_pin_assignment	{ led[0] }	{ LOCATION = A4;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[1] }	{ LOCATION = A3;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[2] }	{ LOCATION = C10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[3] }	{ LOCATION = B12; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+
+# ------------------------------------------------------------
+# 副板↔主板链路（J2 / GPIOB_*）——M6 才启用，先注释留档
+#   SPI_SCLK  J2-1  P4      SPI_MOSI J2-2  N4
+#   SPI_MISO  J2-3  N3      SPI_CS_N J2-4  M5
+#   SPI_IRQ   J2-5  M3      PROJ_SYNC J2-7 L3
+#   LED_IR    J2-8  J3
+# ------------------------------------------------------------
+#set_pin_assignment	{ spi_sclk }	{ LOCATION = P4; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+#set_pin_assignment	{ spi_mosi }	{ LOCATION = N4; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+#set_pin_assignment	{ spi_miso }	{ LOCATION = N3; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+#set_pin_assignment	{ spi_cs_n }	{ LOCATION = M5; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+#set_pin_assignment	{ spi_irq }	{ LOCATION = M3; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+#set_pin_assignment	{ proj_sync }	{ LOCATION = L3; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+#set_pin_assignment	{ led_ir }	{ LOCATION = J3; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
