@@ -27,9 +27,11 @@ M1 的目标是把"FPGA 能不能自己把摄像头配起来、能不能正确�
 
 ```
 src/vision_sub/
+  td_project/
+    vision_sub_m1.al           # TangDynasty 工程（手写，含源文件表 + 约束 + 顶层）
   user_source/
     hdl_source/
-      include/vision_def.v     # 全局参数：分辨率/分频/SCCB 寄存器表
+      vision_def.v             # 全局参数：分辨率/分频/SCCB 寄存器表（被 `include）
       sccb_master.v            # SCCB(类 I2C) 主机，16 位寄存器读写
       dbg_uart.v               # 115200-8N1 调试串口（复用板载 CH340）
       dvp_capture.v            # PCLK 域 DVP 采集（HREF/VSYNC 边沿）
@@ -42,6 +44,12 @@ src/vision_sub/
 tools/sim_vision_sub_m1.py     # 周期精确模型（无 Verilog 仿真器方案）
 doc/vision_sub/README.md        # 本文件
 ```
+
+> **为什么 `vision_def.v` 和其他 HDL 平铺在同一层**：TD 解析 `` `include "xxx.v" `` 时，
+> 可靠的做法是让头文件与引用它的文件同目录（本仓库 `marquee_font.vh` 与
+> `marquee_overlay.v` 就是这个模式）。放进子目录会让 `` `include `` 的搜索路径
+> 变得依赖工程配置，容易变成找不到文件的编译错误。
+
 
 > **为什么顶层不例化 SDRAM/PLL**：M1 只需 50 MHz 板载时钟即可验证"配置 + 采集 + 统计"。
 > 行缓存与 SDRAM 三缓冲帧缓存属 **M1b**（需 TD 的 SDRAM 控制器 IP），M2 之后再接。
@@ -148,12 +156,23 @@ python tools/sim_vision_sub_m1.py
 
 ### 6.2 上板构建（TangDynasty）
 
+工程文件已随仓库提供：**`src/vision_sub/td_project/vision_sub_m1.al`**
+（器件 EG4S20BG256，顶层 `top_vision_m1`，已含 7 个 HDL + `pin.adc` + `timing.sdc`）。
+
+用 TD 打开该 `.al` 即可，首次打开时 TD 会生成 `_Runs/` 与 `.prj` 快照。之后可无头构建：
+
 ```powershell
 pwsh tools/td_build.ps1      # 无头构建，与本仓库主工程一致
 ```
 
-将 `src/vision_sub/user_source/` 下的 HDL 加入工程，约束用本目录的 `pin.adc` / `timing.sdc`，
 综合布线后下载 `best_result` 比特流。
+
+> ⚠️ **关于这个 `.al`**：它是按本仓库现有 `HDMI1.4b_Transmitter_v1.0.al` 的结构手写的，
+> 已校验 XML 结构、器件型号、顶层模块名与全部 9 个文件引用均正确，但**未在真实 TD 上打开验证过**
+> （当前开发机未安装 TD）。若 TD 打开时报错，直接用 GUI 新建工程、把这 7 个 `.v` 与 2 个约束
+> 加进去即可，30 秒的事——本工程没有任何 IP 核，重建成本极低。
+> 注意 `.al` 里 `UsedInP&R` 用的是**裸 `&`**（TD 自己的写法，非标准 XML），这是刻意与 TD 保持一致。
+
 
 ### 6.3 上板验收步骤
 

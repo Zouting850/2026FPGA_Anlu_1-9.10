@@ -40,7 +40,7 @@ import sys
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TOOLS)
 HDL = os.path.join(ROOT, "src", "vision_sub", "user_source", "hdl_source")
-DEFS = os.path.join(HDL, "include", "vision_def.v")
+DEFS = os.path.join(HDL, "vision_def.v")
 F_TOP = os.path.join(HDL, "top_vision_m1.v")
 
 FAILURES = []

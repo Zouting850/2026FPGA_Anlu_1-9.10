@@ -2,9 +2,9 @@
 // vision_def.v
 // 视觉处理副板（EG4S20 / HX4S20）—— 全局参数定义
 //
-// 本文件被 top_vision_m1.v / mt9v034_cfg.v / dvp_capture.v /
-// dbg_uart.v 以 `include 方式引用，须在 TD 工程里把
-// src/vision_sub/user_source/hdl_source/include 加入包含路径。
+// 本文件与引用它的 top_vision_m1.v / mt9v034_cfg.v / dvp_capture.v /
+// sccb_master.v / frame_stat.v / dbg_uart.v 同目录，``include "vision_def.v"``
+// 即可解析，无需在 TD 工程里额外配置包含路径。
 // ============================================================
 
 `ifndef VISION_DEF_V
