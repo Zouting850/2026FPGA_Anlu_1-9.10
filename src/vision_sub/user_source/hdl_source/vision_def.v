@@ -3,7 +3,7 @@
 // 视觉处理副板（EG4S20 / HX4S20）—— 全局参数定义
 //
 // 本文件与引用它的 top_vision_m1.v / mt9v034_cfg.v / dvp_capture.v /
-// sccb_master.v / frame_stat.v / dbg_uart.v 同目录，``include "vision_def.v"``
+// sccb_master.v / frame_stat.v / dbg_uart.v 同目录，`include "vision_def.v"
 // 即可解析，无需在 TD 工程里额外配置包含路径。
 // ============================================================
 
@@ -80,5 +80,42 @@
 `define MT_REG_VERSION    16'h0000
 
 `define CFG_WR_NUM        4'd8       // 配置表写条目数
+
+// ------------------------------------------------------------
+// M2 背景建模 + 帧差二值化参数
+//
+//   逐像素、全无符号运算，绝对差取幅度，从根上避开有符号回绕：
+//     d    = |cur - bg|                                幅度 0..255
+//     fg   = (d > FG_THRESH)                           前景判定位（1 = 前景）
+//     want = fg ? 1 : max(1, d >> BG_SHIFT)            本帧想挪几级
+//     step = min(want, d)                              ← 钳位，见下
+//     bg'  = (cur >= bg) ? bg + step : bg - step
+//
+//   三个关键点（都有模型在 tools/sim_vision_sub_m2.py 里逐条验证）：
+//   1) max(1, ·) 消掉移位积分器的死区：只用 d>>SHIFT 的话，d < 2^SHIFT
+//      时 step 恒为 0，背景会永久停在离 cur 十几级的地方。
+//   2) 但 max(1,·) 必须再钳到 d。否则 d=0 时 step=1，bg 冲到 cur±1；
+//      cur=bg=255 时 bg' = 256 回绕成 0，下一帧 d=255，凭空满屏假前景。
+//      钳位后 d=0 不动、d>=1 照常 1 级/帧收敛，且 bg' 恒落在 [bg, cur]。
+//   3) 背景像素 d <= FG_THRESH。当前 FG_THRESH(24) <= 2*2^BG_SHIFT(32)，
+//      于是 d>>SHIFT 只可能是 0/1，step 恒为 1 —— BG_SHIFT 的指数项暂时
+//      不起作用，只有把 FG_THRESH 提到 2^BG_SHIFT 以上才会显现。
+//
+//   前景像素每 FG_DIV 帧才挪 1 级（≈7.5 级/秒 @60fps）：
+//     - 站立的人不会被立刻吸收：对比度 C 的前景要 (C-FG_THRESH)*FG_DIV 帧
+//       才融合，C=100 约 10s、C=150 约 17s（远大于 SINGLE 判据的稳定 2s）；
+//     - 人离开后的残影也在同一量级上消退。
+//   这两个时间常数是算法鲁棒性与响应速度的取舍，见 doc/vision_sub/README.md。
+// ------------------------------------------------------------
+`define FG_THRESH        8'd24      // 帧差阈值（灰度级）
+`define BG_SHIFT         3'd4       // 背景收敛移位（当前 FG_THRESH<=2*2^SHIFT，实际步长恒为 1）
+`define FG_DIV           8'd8       // 前景像素每 8 帧走 1 级 ≈ 7.5 级/秒 @60fps
+`define FG_CNT_W         17         // 前景计数位宽（90240 < 2^17）
+`define M2_LINE_LEN      6'd53      // M2 状态行长度
+
+// 上电后先花这么些帧把背景直接灌成当前画面。
+// 必要性：BRAM 上电内容未定义，若拿它当背景，开头会满屏假前景，
+// 而前景像素每 FG_DIV 帧才走 1 级，靠算法收敛要好几十秒。
+`define BG_LOAD_FRAMES   8'd16
 
 `endif
