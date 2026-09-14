@@ -1,0 +1,22 @@
+Location         : D:\Nizhenghang\Project\2026Anlu1\boardB_eth_frontend\prj\UDP_EXAMPLE\UDP_EXAMPLE_Runs\phy_1
+Running with     : Tang Dynasty v6.2.178840
+                   Copyright (c) 2012-2025 Anlogic Inc.
+Top Model        : board_b_top
+Device           : EG4S20BG256
+Speed            : NA
+
+Timing Mode      : final
+Setup            : WNS -1418ps  TNS   -82202ps  NUM_FEPS   265
+Hold             : WNS     1ps  TNS        0ps  NUM_FEPS     0
+
+Flow Statistics  :
+---------------------------------------------------------------------------------------------------
+     command     |  #calls  |  wall time   |  cpu time(s)  |  used memory(mb)  |  peak memory(mb)  
+---------------------------------------------------------------------------------------------------
+      route      |    3     |  2m50s(81%)  |   183(75%)    |        649        |        739        
+      place      |    3     |   39s(18%)   |    59(24%)    |        634        |        739        
+    import_db    |    1     |    0s(0%)    |     0(0%)     |        173        |        173        
+  import_device  |    1     |    0s(0%)    |     0(0%)     |        83         |        83         
+---------------------------------------------------------------------------------------------------
+      total      |    8     |    3m29s     |      242      |        649        |        739        
+---------------------------------------------------------------------------------------------------

@@ -1,0 +1,1452 @@
+Created by          : Tang Dynasty v6.2.178840
+                    : Copyright (c) 2012-2025 Anlogic Inc.
+Generated           : Sun Sep 13 00:26:09 2026
+
+Top Model           : board_b_top
+Device              : EG4S20BG256
+Speed               : NA
+STA coverage        : 99.74%
+Constraint File     : D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/source_code/constraints/UDP.sdc;
+Confidence          : Routed
+Check Corner        : Both (Slow and Fast)
+CRPR Enabled        : Yes
+Report Scheme       : 10 end point(s) per path group, 1 path(s) per end point
+
+
+Check Status
+-------------
+
+Corner   | Max      Min     
+------------------------------------
+Slow     | yes      yes     
+Fast     | yes      yes     
+
+MCP/SMD Summary
+--------------------
+
+		Max Check
+		--------------------
+		     Total    Dominated     Shadowed      Ignored   Constraint
+		        80           80            0            0   set_max_delay -from [get_clocks {sdr_clk}]     -to [get_clocks {sdr_clk_sft}] -datapath_only 100
+		        32           32            0            0   set_max_delay -from [get_clocks {sdr_clk_sft}] -to [get_clocks {sdr_clk}]     -datapath_only 100
+		        48           48            0            0   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+		        24           24            0            0   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+		        24           24            0            0   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+
+		Min Check
+		--------------------
+		     Total    Dominated     Shadowed      Ignored   Constraint
+
+Status of timing exceptions
+--------------------------------------------------
+
+MCP/SMD Details
+--------------------
+
+
+Constraint     :   set_max_delay -from [get_clocks {sdr_clk}]     -to [get_clocks {sdr_clk_sft}] -datapath_only 100
+Check Type     :   Max
+--------------------------------------------------------------------------------
+Total Paths    :           80
+Dominated      :           80,        100.0%
+
+
+Constraint     :   set_max_delay -from [get_clocks {sdr_clk_sft}] -to [get_clocks {sdr_clk}]     -datapath_only 100
+Check Type     :   Max
+--------------------------------------------------------------------------------
+Total Paths    :           32
+Dominated      :           32,        100.0%
+
+
+Constraint     :   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+Check Type     :   Max
+--------------------------------------------------------------------------------
+Total Paths    :           48
+Dominated      :           48,        100.0%
+
+
+Constraint     :   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+Check Type     :   Max
+--------------------------------------------------------------------------------
+Total Paths    :           24
+Dominated      :           24,        100.0%
+
+
+Constraint     :   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+Check Type     :   Max
+--------------------------------------------------------------------------------
+Total Paths    :           24
+Dominated      :           24,        100.0%
+
+
+Details on timing exceptions
+--------------------------------------------------
+
+Timing details for constraint:
+	set_max_delay -from [get_clocks {sdr_clk}]     -to [get_clocks {sdr_clk_sft}] -datapath_only 100
+--------------------------------------------------
+
+----------------------------------------------------------------------------------------------------
+Path Group     :     
+set_max_delay -from [get_clocks {sdr_clk}]     -to [get_clocks {sdr_clk_sft}] -datapath_only 100
+
+Type           :     SMD
+
+Statistics:
+Max            : SWNS     87.379ns, STNS      0.000ns,         0 Viol Endpoints,        48 Total Endpoints,        80 Paths Analyzed
+Min            : HWNS      0.000ns, HTNS      0.000ns,         0 Viol Endpoints,         0 Total Endpoints,         0 Paths Analyzed
+----------------------------------------------------------------------------------------------------
+
+Max Paths
+----------------------------------------------------------------------------------------------------
+Slack               : 87.379ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[31] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 12.621ns (cell 8.565ns (67%), net 4.056ns (33%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             4.056          4.202          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_26.ts
+PAD                 x040y005            3.419    f     7.621       1  pin: u_sdram/sdram_syn_26.bpad
+net (fo=0)          x020y036            0.000          7.621          net: dq[31],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[31]
+--------------------------------------------------------------------  ---------------
+Arrival                                                7.621               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 87.379               
+
+Slack               : 87.379ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[30] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 12.621ns (cell 8.565ns (67%), net 4.056ns (33%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             4.056          4.202          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_27.ts
+PAD                 x040y005            3.419    f     7.621       1  pin: u_sdram/sdram_syn_27.bpad
+net (fo=0)          x020y036            0.000          7.621          net: dq[30],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[30]
+--------------------------------------------------------------------  ---------------
+Arrival                                                7.621               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 87.379               
+
+Slack               : 87.690ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[29] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 12.310ns (cell 8.565ns (69%), net 3.745ns (31%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.745          3.891          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_29.ts
+PAD                 x040y008            3.419    f     7.310       1  pin: u_sdram/sdram_syn_29.bpad
+net (fo=0)          x020y036            0.000          7.310          net: dq[29],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[29]
+--------------------------------------------------------------------  ---------------
+Arrival                                                7.310               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 87.690               
+
+Slack               : 87.690ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[28] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 12.310ns (cell 8.565ns (69%), net 3.745ns (31%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.745          3.891          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_30.ts
+PAD                 x040y008            3.419    f     7.310       1  pin: u_sdram/sdram_syn_30.bpad
+net (fo=0)          x020y036            0.000          7.310          net: dq[28],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[28]
+--------------------------------------------------------------------  ---------------
+Arrival                                                7.310               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 87.690               
+
+Slack               : 88.027ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[27] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.973ns (cell 8.565ns (71%), net 3.408ns (29%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.408          3.554          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_31.ts
+PAD                 x040y011            3.419    f     6.973       1  pin: u_sdram/sdram_syn_31.bpad
+net (fo=0)          x020y036            0.000          6.973          net: dq[27],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[27]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.973               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.027               
+
+Slack               : 88.337ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[26] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.663ns (cell 8.565ns (73%), net 3.098ns (27%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.098          3.244          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_32.ts
+PAD                 x040y014            3.419    f     6.663       1  pin: u_sdram/sdram_syn_32.bpad
+net (fo=0)          x020y036            0.000          6.663          net: dq[26],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[26]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.663               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.337               
+
+Slack               : 88.416ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[17] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.584ns (cell 8.565ns (73%), net 3.019ns (27%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.019          3.165          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_24.ts
+PAD                 x000y005            3.419    f     6.584       1  pin: u_sdram/sdram_syn_24.bpad
+net (fo=0)          x020y036            0.000          6.584          net: dq[17],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[17]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.584               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.416               
+
+Slack               : 88.416ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[16] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.584ns (cell 8.565ns (73%), net 3.019ns (27%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             3.019          3.165          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_25.ts
+PAD                 x000y005            3.419    f     6.584       1  pin: u_sdram/sdram_syn_25.bpad
+net (fo=0)          x020y036            0.000          6.584          net: dq[16],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[16]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.584               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.416               
+
+Slack               : 88.811ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[25] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.189ns (cell 8.565ns (76%), net 2.624ns (24%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             2.624          2.770          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_33.ts
+PAD                 x040y020            3.419    f     6.189       1  pin: u_sdram/sdram_syn_33.bpad
+net (fo=0)          x020y036            0.000          6.189          net: dq[25],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[25]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.189               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.811               
+
+Slack               : 88.811ns
+Begin Point         : u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram.dq[24] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk_sft rising@0.000ns - sdr_clk rising@0.000ns }
+Data Path Delay     : 11.189ns (cell 8.565ns (76%), net 2.624ns (24%))
+Clock Skew          : 0.000ns
+Logic Level         : 1 ( PAD=1 )
+Max Fanout          : 34
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.clk
+--------------------------------------------------------------------  ---------------
+clk2q               x011y042z1          0.146    r     0.146          pin: u_sdram/u2_ram/u2_wrrd/sdr_t_reg_syn_11.q[0]
+net (fo=34)                             2.624          2.770          net: u_sdram/u2_ram/u2_wrrd/sdr_t,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_wrrd.enc.v(0)
+                                                                      pin: u_sdram/sdram_syn_34.ts
+PAD                 x040y020            3.419    f     6.189       1  pin: u_sdram/sdram_syn_34.bpad
+net (fo=0)          x020y036            0.000          6.189          net: dq[24],  NOFILE(0)
+                                                                      pin: u_sdram/sdram.dq[24]
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.189               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+output (hard ip)    x020y036           -5.000         95.000               
+clock uncertainty                       0.000         95.000               
+clock pessimism                         0.000         95.000               
+--------------------------------------------------------------------  ---------------
+Required                                              95.000               
+--------------------------------------------------------------------  ---------------
+Slack                                                 88.811               
+
+
+
+Min Paths
+----------------------------------------------------------------------------------------------------
+
+
+Timing details for constraint:
+	set_max_delay -from [get_clocks {sdr_clk_sft}] -to [get_clocks {sdr_clk}]     -datapath_only 100
+--------------------------------------------------
+
+----------------------------------------------------------------------------------------------------
+Path Group     :     
+set_max_delay -from [get_clocks {sdr_clk_sft}] -to [get_clocks {sdr_clk}]     -datapath_only 100
+
+Type           :     SMD
+
+Statistics:
+Max            : SWNS     93.707ns, STNS      0.000ns,         0 Viol Endpoints,        32 Total Endpoints,        32 Paths Analyzed
+Min            : HWNS      0.000ns, HTNS      0.000ns,         0 Viol Endpoints,         0 Total Endpoints,         0 Paths Analyzed
+----------------------------------------------------------------------------------------------------
+
+Max Paths
+----------------------------------------------------------------------------------------------------
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[0] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_1.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[0]
+net (fo=0)                              0.000          5.000          net: dq[0],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_1.bpad
+PAD (reg)           x000y059            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_1.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[6] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_2.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[6]
+net (fo=0)                              0.000          5.000          net: dq[6],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_2.bpad
+PAD (reg)           x000y050            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_2.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[7] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_3.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[7]
+net (fo=0)                              0.000          5.000          net: dq[7],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_3.bpad
+PAD (reg)           x000y050            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_3.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[1] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_7.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[1]
+net (fo=0)                              0.000          5.000          net: dq[1],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_7.bpad
+PAD (reg)           x000y059            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_7.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[2] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_28.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[2]
+net (fo=0)                              0.000          5.000          net: dq[2],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_28.bpad
+PAD (reg)           x000y056            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_28.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[3] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_35.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[3]
+net (fo=0)                              0.000          5.000          net: dq[3],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_35.bpad
+PAD (reg)           x000y056            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_35.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[4] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_43.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[4]
+net (fo=0)                              0.000          5.000          net: dq[4],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_43.bpad
+PAD (reg)           x000y053            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_43.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[8] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_47.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[8]
+net (fo=0)                              0.000          5.000          net: dq[8],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_47.bpad
+PAD (reg)           x040y044            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_47.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[9] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_48.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[9]
+net (fo=0)                              0.000          5.000          net: dq[9],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_48.bpad
+PAD (reg)           x040y044            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_48.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+Slack               : 93.707ns
+Begin Point         : u_sdram/sdram.dq[5] (rising edge triggered by clock sdr_clk_sft  { rise@4.000000ns  fall@0.000000ns  period=8.000000 })
+End Point           : u_sdram/sdram_syn_49.bpad (rising edge triggered by clock sdr_clk  { rise@0.000000ns  fall@4.000000ns  period=8.000000 })
+Check Type          : setup
+Process             : slow
+Budget              : 100.000ns { sdr_clk rising@0.000ns - sdr_clk_sft rising@0.000ns }
+Data Path Delay     : 6.453ns (cell 6.453ns (100%), net 0.000ns (0%))
+Clock Skew          : 0.000ns
+Logic Level         : 0
+Max Fanout          : 0
+Clock Uncertainty   : 0.000ns (sdc uncertainty: 0.000ns, default uncertainty: 0.100ns)
+
+Delay Type          Location             Incr           Path   Level  Netlist Info
+--------------------------------------------------------------------  ---------------
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[2]
+net (fo=1)                              0.000          0.000          net: u_sdram/u2_ram/SDRAM_CLK,  ../../../../source_code/rtl/sdr/rtl/enc_file/sdr_as_ram.enc.v(35)
+                                                                      pin: u_sdram/sdram_syn_45.do[0]
+PAD                 x040y041            0.000          0.000          pin: u_sdram/sdram_syn_45.opad
+net (fo=1)          x020y036            0.000          0.000          net: clk,  NOFILE(0)
+                                                                      pin: u_sdram/sdram.clk
+--------------------------------------------------------------------  ---------------
+input (hard ip)     x020y036            5.000          5.000          pin: u_sdram/sdram.dq[5]
+net (fo=0)                              0.000          5.000          net: dq[5],  NOFILE(0)
+                                                                      pin: u_sdram/sdram_syn_49.bpad
+PAD (reg)           x000y053            1.453    f     6.453               
+--------------------------------------------------------------------  ---------------
+Arrival                                                6.453               
+
+source latency                          0.000          0.000               
+port                R7                  0.000          0.000          pin: clk_50
+hierarchy                               0.000          0.000          pin: clk_50_syn_2.ipad
+PAD                 x020y071            0.000          0.000          pin: clk_50_syn_2.di
+net (fo=28)         x000y071            0.000          0.000          net: clk_50_dup_1,  ../../../../source_code/rtl/board_b_top.v(52)
+                                                                      pin: u_pll_50/pll_inst.refclk
+PLL                 x000y071            0.000          0.000          pin: u_pll_50/pll_inst.clkc[0]
+net (fo=1)                              0.000          0.000          net: u_pll_50/clk0_buf,  ../../al_ip/pll_50.v(40)
+                                                                      pin: u_pll_50/bufg_feedback.clki
+GCLK                x001y070z2          0.000          0.000          pin: u_pll_50/bufg_feedback.clko
+net (fo=704)        x000y000            0.000          0.000          net: u_bmp_decode/clk,  ../../../../source_code/rtl/bmp_decode.v(63)
+                                                                      pin: u_sdram/u0_clk/pll_inst.refclk
+PLL                 x000y000            0.000          0.000          pin: u_sdram/u0_clk/pll_inst.clkc[1]
+net (fo=496)                            0.000          0.000          net: u_sdram/u1_app_wrrd/clk,  ../../../../source_code/rtl/sdr/rtl/app_wrrd.v(14)
+                                                                      pin: u_sdram/sdram_syn_49.ipclk
+constraint delay                      100.000        100.000               
+--------------------------------------------------------------------  ---------------
+setup                                   0.160        100.160               
+clock uncertainty                       0.000        100.160               
+clock pessimism                         0.000        100.160               
+--------------------------------------------------------------------  ---------------
+Required                                             100.160               
+--------------------------------------------------------------------  ---------------
+Slack                                                 93.707               
+
+
+
+Min Paths
+----------------------------------------------------------------------------------------------------
+
+
+
+

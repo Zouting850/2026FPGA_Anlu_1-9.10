@@ -35,15 +35,20 @@ THREE PROPERTIES ARE LOAD-BEARING, each paired with a negative control below:
 
 Owner-driven sd_sec_read also settles the withdrawal case for free: load_abort
 puts bmp_read back in ST_IDLE, a RIFF/WAVE rejection puts sd_audio_stream in
-S_FAULT, and MUSC 0 (music_req falling, i.e. the test tone re-selected) retires
-sd_audio_stream to S_IDLE at the end of the sector in flight. All three drop
-their request while the grant is still outstanding or shortly after it.
+S_FAULT, MUSC 0 (music_req falling, i.e. the test tone re-selected) retires
+sd_audio_stream to S_IDLE at the end of the sector in flight, and a per-image
+track switch does the same thing for one sector -- sd_card_bmp drops
+aud_start = audio_phase && !track_pending, waits for stream_idle, rewrites the
+live wav_sector/wav_size pair, and lets it re-arm on the new track. All four
+drop their request while the grant is still outstanding or shortly after it.
 Because the port no longer depends on the request, the granted sector always
 runs to its end pulse and the arbiter always releases. The wasted sector is
 ignored by the withdrawer -- bmp_len_cnt only counts in ST_LOAD_DATA and rd_cnt
 only advances under reading_sector, which excludes ST_IDLE. music_req also gates
 the arm itself, so in the power-up tone mode the streamer never enters the
-arbiter at all (pass F, pass G, control N4).
+arbiter at all (pass F, pass G, control N4). The switch is the one withdrawal
+that comes back on its own, so it is measured against an unswitched run of
+identical geometry and against the mid-retire mutant (pass H, control N5).
 
 A withdrawal does NOT deadlock a request-driven mux, which is what an earlier
 reading of this design assumed: the reader latches on the grant cycle, one edge
@@ -162,6 +167,27 @@ def parse_rtl():
     _find(r"wire\s+audio_start_now\s*=\s*music_req\s*&&", bmp,
           "music_req gating audio_start_now")
     _find(r"audio_phase\s*&&\s*!music_req", bmp, "the music_req de-arm term")
+
+    # The per-image track switch. The model's `armed` is aud_start, not
+    # audio_phase, and its retarget is gated on stream_idle -- both of which are
+    # asserted here rather than restated, so renaming the handshake or dropping
+    # stream_idle off the instance fails the parse instead of quietly letting the
+    # bench prove a switch law the silicon does not implement.
+    cfg["AUDIO_MULTI_TRACK"] = _int(
+        _find(r"AUDIO_MULTI_TRACK\s*=\s*([^,)\n]+)", bmp,
+              "AUDIO_MULTI_TRACK").group(1))
+    cfg["AUTO_TRACK_IDX"] = _int(
+        _find(r"AUTO_TRACK_IDX\s*=\s*([^,)\n]+)", bmp, "AUTO_TRACK_IDX").group(1))
+    cfg["AUDIO_FOLLOW_IN_AUTO"] = _int(
+        _find(r"AUDIO_FOLLOW_IN_AUTO\s*=\s*([^,)\n]+)", bmp,
+              "AUDIO_FOLLOW_IN_AUTO").group(1))
+    _find(r"wire\s+aud_start\s*=\s*audio_phase\s*&&\s*!track_pending", bmp,
+          "aud_start = audio_phase && !track_pending")
+    _find(r"track_pending\s*&&\s*aud_stream_idle", bmp,
+          "the stream_idle half of the switch handshake")
+    _find(r"\.start\s*\(aud_start\)", bmp, "the streamer's start tied to aud_start")
+    _find(r"\.stream_idle\s*\(aud_stream_idle\)", bmp,
+          "the streamer's stream_idle output")
 
     inst = _find(r"sd_audio_stream\s*#\s*\((.*?)\)\s*sd_audio_stream_m0", bmp,
                  "the sd_audio_stream instance", re.S).group(1)
@@ -421,8 +447,10 @@ class AudioConsumer:
     Same one-cycle request gap at a sector boundary as bmp_read. S_WAIT holds
     the request low while wrusedw >= PAUSE_THRESH, and that pause is the
     multi-cycle window the arbiter uses to serve pictures. A falling `armed`
-    (MUSC 0, i.e. audio_phase de-asserted) retires to S_IDLE -- at the sector's
-    end pulse from S_READ, immediately from S_WAIT.
+    retires to S_IDLE -- at the sector's end pulse from S_READ, immediately from
+    S_WAIT. `armed` is sd_card_bmp's aud_start = audio_phase && !track_pending,
+    so it falls for two distinct reasons: MUSC 0 de-asserting audio_phase, and a
+    per-image track switch that only lasts until stream_idle comes back.
     """
 
     def __init__(self, wav_sector, pcm_frames, hdr_len, pause_thresh,
@@ -447,6 +475,20 @@ class AudioConsumer:
         self.fault = False
         self.fault_cycle = None
         self.withdraw_cycle = None
+        self.retarget_cycle = None
+
+    def retarget(self, wav_sector, pcm_frames, cycle=None):
+        """sd_card_bmp's switch handshake: wav_sector/wav_size are rewritten only
+        while stream_idle is high, and S_IDLE is the one state that is neither
+        holding a granted sector nor about to read wav_start_sector. The assert
+        is the whole point -- a bench that skips the handshake blows up here
+        instead of quietly streaming the wrong bytes.
+        """
+        assert self.state == A_IDLE, \
+            "retarget while state=%d: stream_idle was not honoured" % self.state
+        self.wav_sector = wav_sector
+        self.pcm_frames = pcm_frames
+        self.retarget_cycle = cycle
 
     @property
     def pause_now(self):
@@ -528,6 +570,26 @@ class AudioConsumer:
         self.req, self.addr, self.state = nreq, naddr, nstate
 
 
+class AudioConsumerMidRetire(AudioConsumer):
+    """MUTANT: give up the cycle `armed` drops instead of at the sector end.
+
+    Same stimulus, same sampling, one line of policy changed -- so whatever pass
+    H measures on the real consumer and then fails on this one is caused by the
+    retire point and nothing else. The damage is that the arbiter keeps the port
+    granted to audio for the rest of a sector audio is no longer asking for, and
+    that the re-arm presents a NEW address while the reader is still delivering
+    the old one.
+    """
+
+    def step(self, dv, en, armed, cycle, fault_inject=False):
+        was_read = (self.state == A_READ)
+        AudioConsumer.step(self, dv, en, armed, cycle, fault_inject)
+        if was_read and not armed and self.state != A_FAULT:
+            self.state = A_IDLE
+            self.req = 0
+            self.withdraw_cycle = cycle
+
+
 # --------------------------------------------------------------------------
 # Arbiter: the RTL under test.
 # --------------------------------------------------------------------------
@@ -588,7 +650,8 @@ class Arbiter:
 # --------------------------------------------------------------------------
 class Bench:
     def __init__(self, cfg, images, byte_cycles=1, wav_sector=900000,
-                 wav_frames=0, arb=None, gate_arm_on_music=True):
+                 wav_frames=0, arb=None, gate_arm_on_music=True,
+                 wav_sector2=None, wav_frames2=None):
         self.cfg = cfg
         self.byte_cycles = byte_cycles
         # gate_arm_on_music=False reproduces the pre-change arm law, where
@@ -605,6 +668,10 @@ class Bench:
         self.aud = AudioConsumer(wav_sector, wav_frames or (1 << 30),
                                  cfg["HDR_LEN"], cfg["PAUSE_THRESH"],
                                  self.drain_cycles, cfg["FIFO_DEPTH"])
+        # Track 2 of the per-image table. Left None by every pass that is not
+        # about the switch, so a stray switch_when cannot silently do nothing.
+        self.wav_sector2 = wav_sector2
+        self.wav_frames2 = wav_frames2 or (1 << 30)
         self.arb = arb or Arbiter()
         self.gate = self.arb.gate
         self.cycle = 0
@@ -612,6 +679,16 @@ class Bench:
         self.music_req = 1          # sd_card_bmp's music_req input (MUSC 0/1)
         self.audio_arm_cycle = None
         self.audio_dearm_cycle = None
+        # sd_card_bmp's switch handshake: track_pending holds aud_start low from
+        # the cycle the request differs until the cycle stream_idle is seen, and
+        # the live pair is rewritten in between.
+        self.track_idx = 0
+        self.track_pending = 0
+        self.switch_req_cycle = None
+        self.switch_idle_cycle = None
+        self.switch_rearm_cycle = None
+        self.switch_reader_idx = None
+        self.switch_recv_len = 0
         self.sector_owner = {}      # latched addr -> 'bmp'/'aud' at latch time
         self.served = []            # (cycle, addr, owner) per latched sector
         self.bmp_asked = set()      # addrs driven while bmp owned the port
@@ -627,6 +704,12 @@ class Bench:
         self.bad_count = 0          # bytes delivered to a consumer that never
         self.bad_first = []         #   asked the port for that address
         self.arb_idle_with_req = 0  # cycles the arbiter wasted a ready request
+        # Cycles where the reader is still mid-sector on a grant whose owner has
+        # stopped asking. Zero in every correct run -- the owner holds its
+        # request for the whole sector -- and the number the mid-retire mutant
+        # in pass H is measured by.
+        self.abandoned_inflight = 0
+        self.abandoned_first = []
         self.aborted = False
         self._bmp_pending = None
         self._aud_pending = None
@@ -642,18 +725,61 @@ class Bench:
         return bool(self.arb.aud_own and self.aud.state == A_READ
                     and not self.aud.fault)
 
+    def switch_midsector(self):
+        """img_idx changing while audio is part-way through a GRANTED sector.
+
+        Deliberately the worst landing point rather than a boundary-aligned one:
+        if the handshake only survived a switch that happened to arrive between
+        sectors it would be proving nothing, because on the panel the user presses
+        A2 at an arbitrary moment.
+        """
+        return bool(self.switch_req_cycle is None and self.track_idx == 0
+                    and self.audio_phase and self.arb.aud_own
+                    and self.aud.state == A_READ
+                    and self.reader.state == R_READ
+                    and 64 < self.reader.byte_idx < SECTOR - 64)
+
     def run(self, max_cycles, music_req=1, abort_when=None, fault_when=None,
-            miss_at=None, stop_when=None):
+            miss_at=None, stop_when=None, switch_when=None):
         # music_req is sd_card_bmp's input: a constant level, or a predicate on
         # the bench so a pass can drop MUSC 0 mid-load and raise it again.
         req_fn = music_req if callable(music_req) else (lambda b: music_req)
         for _ in range(max_cycles):
             c = self.cycle
             self.music_req = bool(req_fn(self))
+
+            # --- 0. sd_card_bmp's switch handshake, all off pre-cycle regs ----
+            # aud_start = audio_phase && !track_pending is combinational off a
+            # REGISTER, so the value the streamer sees this cycle is the one
+            # latched last cycle -- including on the very cycle the handshake
+            # completes, which is why armed is taken before track_pending is
+            # cleared below.
+            armed = bool(self.audio_phase and not self.track_pending)
+            if (self.switch_rearm_cycle is None
+                    and self.switch_idle_cycle is not None
+                    and self.aud.state == A_READ and self.aud.req):
+                self.switch_rearm_cycle = c
+            if self.track_pending and self.aud.state == A_IDLE:
+                # else if (track_pending && aud_stream_idle): rewrite the live
+                # pair and drop track_pending. Stream_idle is the one state that
+                # is not holding a granted sector and will not read
+                # wav_start_sector until aud_start rises again.
+                self.aud.retarget(self.wav_sector2, self.wav_frames2, c)
+                self.track_idx = 1
+                self.track_pending = 0
+                self.switch_idle_cycle = c
+
             if miss_at is not None and c == miss_at and self.reader.miss_plan == 0:
                 self.reader.miss_plan = self.cfg["RD_RETRY_MAX"]
             abort = bool(abort_when and abort_when(self))
             fault = bool(fault_when and fault_when(self))
+            if switch_when is not None and switch_when(self):
+                # sd_card_bmp: track_req_r != track_cur -> track_pending <= 1.
+                # Registered, so aud_start does not fall until the next cycle.
+                self.switch_req_cycle = c
+                self.switch_reader_idx = self.reader.byte_idx
+                self.switch_recv_len = len(self.aud.recv)
+                self.track_pending = 1
 
             # --- 1. combinational outputs off the pre-cycle snapshot ---------
             end = self.reader.out_end()
@@ -710,6 +836,18 @@ class Bench:
                     if len(self.addr_mismatch) < 3:
                         self.addr_mismatch.append((c, self.reader.addr, want))
 
+            # The other half of the same invariant: while the reader is mid
+            # sector, the grantee must still be asking. The arbiter cannot take
+            # the port back before the end pulse, so a consumer that stops
+            # requesting early strands a granted sector nobody will consume.
+            if self.reader.in_flight and (bmp_own or aud_own):
+                held = aud_req if aud_own else bmp_req
+                if not held:
+                    self.abandoned_inflight += 1
+                    if len(self.abandoned_first) < 3:
+                        self.abandoned_first.append(
+                            (c, "aud" if aud_own else "bmp", self.reader.addr))
+
             # grant latency: cycles from a request rising to ownership, holding
             # the rise across the one-cycle boundary gap so the number is the
             # wait for THIS sector rather than for the previous one.
@@ -732,8 +870,7 @@ class Bench:
             # --- 3. next state, all from the snapshot -----------------------
             self.reader.step(sec_read, sec_addr)
             self.bmp.step(bmp_dv, bmp_en, abort=abort)
-            self.aud.step(aud_dv, aud_en, self.audio_phase, c,
-                          fault_inject=fault)
+            self.aud.step(aud_dv, aud_en, armed, c, fault_inject=fault)
             self.arb.step(end, bmp_req, aud_req)
 
             # audio_phase, exactly as sd_card_bmp drives it: armed only while
@@ -1085,12 +1222,129 @@ def pass_g_music_req(cfg):
           "pictures kept loading through the whole toggle and were served their "
           "exact request order (%d sectors)" % len(b.bmp_served))
     check(not b.bad_delivery() and not b.mismatch_count
-          and not b.ungranted_count and not b.arb.switches_midsector,
-          "no misdelivered byte, no address mismatch, no ungranted latch and no "
-          "mid-sector ownership switch anywhere across the toggling",
-          "bad=%s mismatch=%d ungranted=%d switches=%d"
+          and not b.ungranted_count and not b.arb.switches_midsector
+          and not b.abandoned_inflight,
+          "no misdelivered byte, no address mismatch, no ungranted latch, no "
+          "mid-sector ownership switch and no granted-but-unrequested sector "
+          "anywhere across the toggling",
+          "bad=%s mismatch=%d ungranted=%d switches=%d abandoned=%d"
           % (b.bad_delivery(), b.mismatch_count, b.ungranted_count,
-             b.arb.switches_midsector))
+             b.arb.switches_midsector, b.abandoned_inflight))
+
+
+def pass_h_track_switch(cfg):
+    print("\n[H] per-image track switch: img_idx changes under a live stream")
+    sec1, sec2 = 900000, 950000
+    b = fresh(cfg, factor=8, wav_sector=sec1, wav_sector2=sec2)
+    ref = fresh(cfg, factor=8, wav_sector=sec1, wav_sector2=sec2)
+    b.run(CYC_PER_SEC, switch_when=Bench.switch_midsector,
+          stop_when=lambda: not b.bmp.busy)
+    ref.run(CYC_PER_SEC, stop_when=lambda: not ref.bmp.busy)
+
+    check(b.stopped_at is not None and ref.stopped_at is not None,
+          "both the switched run and the no-switch reference finished all four "
+          "pictures", "switched=%s reference=%s" % (b.stopped_at, ref.stopped_at))
+    check(ref.switch_req_cycle is None,
+          "the reference really never switched, so the comparison below is "
+          "against an unswitched run of identical geometry")
+
+    # --- the handshake happened, and it was NOT a MUSC 0 withdraw ------------
+    check(b.switch_req_cycle is not None and b.switch_idle_cycle is not None
+          and b.switch_rearm_cycle is not None,
+          "track_pending was set on cycle %s, stream_idle came back on cycle %s "
+          "and the new track was requesting the port on cycle %s"
+          % (b.switch_req_cycle, b.switch_idle_cycle, b.switch_rearm_cycle),
+          "req=%s idle=%s rearm=%s" % (b.switch_req_cycle, b.switch_idle_cycle,
+                                       b.switch_rearm_cycle))
+    check(b.audio_dearm_cycle is None and b.audio_phase == 1,
+          "audio_phase stayed ARMED through the whole switch -- this is not the "
+          "MUSC 0 path pass G covers, it is aud_start dropping for one sector "
+          "while the source select still wants music")
+    check(b.aud.retarget_cycle == b.switch_idle_cycle
+          and b.aud.wav_sector == sec2 and b.track_idx == 1,
+          "the live (sector, size) pair was rewritten on the stream_idle cycle "
+          "and only there, so track 2 (%d) is the one now armed" % sec2,
+          "retarget=%s idle=%s sector=%s" % (b.aud.retarget_cycle,
+                                             b.switch_idle_cycle, b.aud.wav_sector))
+
+    # --- the retire cost at most the sector that was in flight ---------------
+    one_sector = (b.reader.cmd_cycles + SECTOR * b.byte_cycles + 1)
+    check(0 < b.switch_reader_idx < SECTOR,
+          "the switch landed with %d of 512 payload bytes already delivered, so "
+          "the sector genuinely was in flight" % b.switch_reader_idx)
+    retired = b.switch_idle_cycle - b.switch_req_cycle
+    check(0 < retired <= one_sector,
+          "the streamer retired %d model cycles later, inside the %d cycles one "
+          "granted sector takes -- it finished the sector it held rather than "
+          "dropping it" % (retired, one_sector))
+    note("retire %.3f ms of real card time; the worst case is a switch landing "
+         "on the sector's first byte, i.e. %.3f ms"
+         % (b.real_ms(retired), b.real_ms(one_sector)))
+
+    tail_bytes = len([x for x in b.aud.recv[b.switch_recv_len:] if x[0] < sec2])
+    tail_words = tail_bytes // 4
+    check(0 < tail_bytes <= SECTOR - b.switch_reader_idx,
+          "track 1's abandoned tail is %d bytes = %d stereo frames, at most the "
+          "%d bytes still outstanding in the granted sector"
+          % (tail_bytes, tail_words, SECTOR - b.switch_reader_idx),
+          "tail=%d outstanding=%d" % (tail_bytes, SECTOR - b.switch_reader_idx))
+    check(tail_words <= SECTOR // 4,
+          "so the splice drops at most %d frames = %.1f ms of the old track, "
+          "which the player drains unheard while the FIFO still holds %.2f ms"
+          % (tail_words, tail_words / (cfg["SAMPLE_RATE_HZ"] / 1000.0),
+             cfg["FIFO_SLACK_MS"]))
+
+    # --- and track 2 really was read, from its own first sector -------------
+    check(sec2 in b.aud_served,
+          "sector %d was granted and served to audio after the switch" % sec2)
+    new_bytes = [x for x in b.aud.recv[b.switch_recv_len:] if x[0] >= sec2]
+    check(bool(new_bytes) and new_bytes[0][0] == sec2,
+          "and the first byte of the new track came from %d, not from track 1's "
+          "drop point -- %d bytes of track 2 reached the streamer"
+          % (sec2, len(new_bytes)))
+
+    # --- latency bound, including the picture sector that can win the gap ----
+    # aud_start rises three cycles after the retire, and in those three cycles
+    # audio is not requesting, so the arbiter is free to hand the port to
+    # pictures. That costs one picture sector, and it is the honest worst case
+    # rather than a number chosen to pass.
+    switch_cost = b.switch_rearm_cycle - b.switch_req_cycle
+    bound = 2 * one_sector + 8
+    check(0 < switch_cost <= bound,
+          "request to re-armed request took %d model cycles, inside the %d of "
+          "one sector to retire plus one picture sector that can win the re-arm "
+          "gap" % (switch_cost, bound))
+    worst_ms = b.real_ms(max(b.aud_latency) if b.aud_latency else 0)
+    check(worst_ms < cfg["FIFO_SLACK_MS"],
+          "worst audio request->grant across the switch is %.3f ms, still inside "
+          "the FIFO's %.2f ms slack, so the switch cannot underrun the player"
+          % (worst_ms, cfg["FIFO_SLACK_MS"]), "underrun guaranteed")
+    note("switch cost %.3f ms real; worst audio grant latency %.3f ms against "
+         "%.3f ms with no switch; FIFO underran %d model cycles against %d"
+         % (b.real_ms(switch_cost), worst_ms,
+            ref.real_ms(max(ref.aud_latency) if ref.aud_latency else 0),
+            b.aud.underrun_cycles, ref.aud.underrun_cycles))
+
+    # --- arbiter invariants across the switch -------------------------------
+    check(not b.bad_delivery() and not b.mismatch_count
+          and not b.ungranted_count and not b.arb.switches_midsector
+          and not b.abandoned_inflight,
+          "no misdelivered byte, no address mismatch, no ungranted latch, no "
+          "mid-sector ownership switch and no sector left granted to a streamer "
+          "that stopped asking -- the in-flight sector was never mis-served",
+          "bad=%s mismatch=%d ungranted=%d switches=%d abandoned=%d first=%s"
+          % (b.bad_delivery(), b.mismatch_count, b.ungranted_count,
+             b.arb.switches_midsector, b.abandoned_inflight, b.abandoned_first))
+    check(b.bmp_served == b.bmp.expected_addrs(),
+          "pictures were still served their exact request order through the "
+          "switch (%d sectors)" % len(b.bmp_served))
+    delta = b.stopped_at - ref.stopped_at
+    check(abs(delta) <= 2 * one_sector,
+          "and the whole picture load finished %d model cycles %s than the "
+          "unswitched reference, i.e. the switch costs the panel at most the two "
+          "sectors it actually spent"
+          % (abs(delta), "later" if delta > 0 else "sooner"),
+          "switched=%d reference=%d" % (b.stopped_at, ref.stopped_at))
 
 
 # --------------------------------------------------------------------------
@@ -1209,6 +1463,44 @@ def control_n4(cfg):
                 old.real_ms(old.stopped_at) / 1000.0 * 16))
 
 
+def control_n5(cfg):
+    print("\n[N5] control: retiring the cycle aud_start drops instead of at the "
+          "sector boundary")
+    # Identical stimulus to pass H -- same geometry, same switch landing point --
+    # with one line of policy changed. So everything that breaks here is caused
+    # by the retire point, which is what makes pass H's clean run mean anything.
+    sec1, sec2 = 900000, 950000
+    b = fresh(cfg, factor=8, wav_sector=sec1, wav_sector2=sec2)
+    b.aud = AudioConsumerMidRetire(sec1, 1 << 30, cfg["HDR_LEN"],
+                                   cfg["PAUSE_THRESH"], b.drain_cycles,
+                                   cfg["FIFO_DEPTH"])
+    b.run(CYC_PER_SEC, switch_when=Bench.switch_midsector,
+          stop_when=lambda: not b.bmp.busy)
+
+    check(b.switch_req_cycle is not None and b.switch_idle_cycle is not None
+          and b.stopped_at is not None,
+          "the mutant was driven through the same mid-sector switch on cycle %s "
+          "and the run still finished" % b.switch_req_cycle)
+    expect_fail(b.abandoned_inflight == 0,
+                "the port stays granted to audio for %d cycles of a sector audio "
+                "has already stopped asking for -- the arbiter cannot take it "
+                "back before the end pulse, so those bytes are read off the card "
+                "for nobody" % b.abandoned_inflight)
+    expect_fail(b.mismatch_count == 0,
+                "the re-arm presents track 2's address %d while the reader is "
+                "still delivering track 1's sector, so %d cycles have the "
+                "in-flight address disagreeing with the grantee's"
+                % (sec2, b.mismatch_count))
+    expect_fail(sec2 in b.aud_served,
+                "and track 2's first sector is never read at all -- the mutant "
+                "swallows the OLD sector's end pulse as its own sector boundary, "
+                "advances to %d and skips straight past the header" % (sec2 + 1))
+    note("abandoned %d cycles, first %s; mismatches %d, first %s; audio sectors "
+         "served %d"
+         % (b.abandoned_inflight, b.abandoned_first, b.mismatch_count,
+            b.addr_mismatch, len(b.aud_served)))
+
+
 def main():
     cfg = parse_rtl()
     print("sim_sd_arbiter: SD sector-read port arbiter model")
@@ -1218,6 +1510,10 @@ def main():
           % (cfg["SCAN_TARGET_COUNT"], cfg["AUDIO_START_ON_FIRST_IMAGE"],
              cfg["HDR_LEN"], cfg["PAUSE_THRESH"], cfg["FIFO_DEPTH"],
              cfg["RD_RETRY_MAX"]))
+    print("  track select: AUDIO_MULTI_TRACK=%d AUTO_TRACK_IDX=%d "
+          "AUDIO_FOLLOW_IN_AUTO=%d"
+          % (cfg["AUDIO_MULTI_TRACK"], cfg["AUTO_TRACK_IDX"],
+             cfg["AUDIO_FOLLOW_IN_AUTO"]))
     print("  SD clock %.0f MHz, SPI SCK %.1f MHz, one byte %d sys_clk, "
           "FIFO slack %.2f ms"
           % (cfg["SD_CLK_HZ"] / 1e6, cfg["SCK_HZ"] / 1e6,
@@ -1238,12 +1534,14 @@ def main():
     pass_e_fault(cfg)
     pass_f_scan_regression(cfg)
     pass_g_music_req(cfg)
+    pass_h_track_switch(cfg)
 
     control_n1(cfg)
     control_n1_directed()
     control_n2(cfg)
     control_n3(cfg)
     control_n4(cfg)
+    control_n5(cfg)
 
     print("")
     if FAILURES:

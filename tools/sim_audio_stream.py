@@ -18,8 +18,13 @@ clock, which is fine because the streamer only acts on data_valid cycles, so the
 frame stream is identical at any byte rate.
 
 Modelled properties: header skip, 4-byte stereo-frame assembly, sector-boundary
-backpressure, the single-track loop, and the MUSC 0 withdraw (start falling while
-a sector is in flight).
+backpressure, the single-track loop, the MUSC 0 withdraw (start falling while a
+sector is in flight), and the per-image track switch -- retire to S_IDLE at the
+sector boundary, retarget wav_start_sector/wav_size there and only there, re-arm.
+Two properties the switch depends on are modelled explicitly because the RTL
+changed for it: magic_done is cleared on every arm, so each track validates its
+own RIFF/WAVE header; and S_FAULT is no longer terminal, so one rejected track
+does not silence the other three.
 
 HDR_LEN and PAUSE_THRESH are parsed out of the .v file rather than restated here,
 so the model cannot silently drift from the RTL.
@@ -80,7 +85,9 @@ def _parse_int(expr):
 
 def parse_rtl(path=RTL):
     with open(path, "r", encoding="utf-8") as fh:
-        code = re.sub(r"//[^\n]*", "", fh.read())
+        code = fh.read()
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
     cfg = {}
     for name, expr in re.findall(
             r"parameter\s+(?:integer\s+)?(?:\[\d+:\d+\]\s*)?(\w+)\s*=\s*"
@@ -93,6 +100,34 @@ def parse_rtl(path=RTL):
         if req not in cfg:
             raise SystemExit("sim_audio_stream: could not parse %r out of %s; "
                              "the model is stale, fix the parser" % (req, path))
+
+    # Structural guards for the three constructs the per-image track switch is
+    # built on. The model mirrors all three, so if any of them is renamed or
+    # reverted the tests below would keep passing against a streamer the silicon
+    # no longer implements -- which is worse than failing.
+    def need(pattern, what, text=code, flags=0):
+        if not re.search(pattern, text, flags):
+            raise SystemExit("sim_audio_stream: %s is gone from %s; the model is "
+                             "stale, fix the parser or the RTL together"
+                             % (what, path))
+
+    need(r"assign\s+stream_idle\s*=\s*\(state\s*==\s*S_IDLE\)",
+         "assign stream_idle = (state == S_IDLE)")
+
+    arm = re.search(r"if\s*\(start\)\s*begin(.*?)state\s*<=\s*S_READ\s*;",
+                    code, re.S)
+    if arm is None:
+        raise SystemExit("sim_audio_stream: could not find the S_IDLE arm branch "
+                         "in %s" % path)
+    need(r"magic_done\s*<=\s*1'b0", "magic_done cleared on every arm",
+         arm.group(1))
+
+    fault = re.search(r"S_FAULT:\s*begin(.*?)\bend\b", code, re.S)
+    if fault is None:
+        raise SystemExit("sim_audio_stream: could not find the S_FAULT branch "
+                         "in %s" % path)
+    need(r"if\s*\(\s*!start\s*\)\s*state\s*<=\s*S_IDLE",
+         "the non-terminal S_FAULT retire on !start", fault.group(1))
     return cfg
 
 
@@ -137,6 +172,27 @@ class AudioStream(object):
     def pause_now(self, wrusedw):
         return wrusedw >= self.PAUSE_THRESH
 
+    # assign stream_idle = (state == S_IDLE)
+    #
+    # The retire acknowledgement sd_card_bmp waits on before rewriting
+    # wav_start_sector/wav_size. Deliberately NOT true in S_FAULT even though
+    # S_FAULT also holds the request low: a rejected track keeps owning the
+    # table until start falls and retires it to S_IDLE, which is what stops a
+    # switch from swapping the table under a streamer that is still armed.
+    @property
+    def stream_idle(self):
+        return self.state == S_IDLE
+
+    def retarget(self, wav_start_sector, wav_size):
+        """What sd_card_bmp does on the cycle it observes stream_idle: point the
+        inputs at a different table slot. Only legal while stream_idle -- the
+        whole point of the handshake is that this never happens with a granted
+        sector in flight."""
+        assert self.stream_idle, \
+            "retarget while state=%d, not S_IDLE: the handshake was skipped" % self.state
+        self.wav_start_sector = wav_start_sector & 0xFFFFFFFF
+        self.wav_size = wav_size & 0xFFFFFFFF
+
     def step(self, start, data, data_valid, end, wrusedw):
         data &= 0xFF
         # next-value locals, seeded from current state (non-blocking defaults)
@@ -166,6 +222,12 @@ class AudioStream(object):
                     hdr_skip_n = self.HDR_LEN
                     hdr_cnt_n = 0
                     phase_n = 0
+                    # Cleared per arm, not per power-up: every arm can name a
+                    # different track now, so each one re-validates its own
+                    # RIFF/WAVE header. The end-of-song rewind below stays in
+                    # S_READ and never lands here, so a looping track is still
+                    # checked exactly once.
+                    magic_done_n = 0
                     addr_n = self.wav_start_sector
                     state_n = S_READ
 
@@ -252,6 +314,13 @@ class AudioStream(object):
 
         elif self.state == S_FAULT:
             read_n = 0
+            # Non-terminal now. Against a single track a rejection meant there
+            # was nothing else to play, so latching off forever was correct and
+            # free. Against a per-image table it would take the other three
+            # tracks down with it, so this retires on !start like S_READ and
+            # S_WAIT do and lets the switch handshake re-arm a different slot.
+            if not start:
+                state_n = S_IDLE
 
         else:
             read_n = 0
@@ -272,6 +341,23 @@ class AudioStream(object):
         self.l_lo, self.l_hi, self.r_lo = l_lo_n, l_hi_n, r_lo_n
         self.fifo_we = we_n
         self.fifo_di = di_n
+
+
+class AudioStreamFaultTerminal(AudioStream):
+    """MUTANT: the pre-change RTL, in which S_FAULT ignored !start.
+
+    One rejected track then owned the streamer for the rest of the power cycle,
+    which was free when the card held one track and fatal once it held four.
+    Expressed as a subclass so the shipped model above stays a faithful mirror
+    of the .v file with no mutant hook in it.
+    """
+
+    def step(self, start, data, data_valid, end, wrusedw):
+        was_fault = (self.state == S_FAULT)
+        AudioStream.step(self, start, data, data_valid, end, wrusedw)
+        if was_fault:
+            self.state = S_FAULT          # undo the retire on !start
+            self.sd_sec_read = 0
 
 
 # --------------------------------------------------------------------------
@@ -510,7 +596,8 @@ def test_control_bad_magic(cfg):
     rd = SdReader(card)
     words = run(st, rd, 3000)
     check(st.state == S_FAULT,
-          "bad magic drives the streamer to the terminal silent S_FAULT",
+          "bad magic drives the streamer to a silent S_FAULT that holds for as "
+          "long as it stays armed",
           "state=%d" % st.state)
     expect_fail(len(words) > 0,
                 "a faulted header emits zero FIFO words (no garbage audio)")
@@ -609,24 +696,36 @@ def test_withdraw_and_rearm(cfg):
           "the re-armed replay reproduces the whole track exactly and "
           "frame-aligned -> it restarted from byte 0, not from the drop point")
 
-    # --- phase E: magic_done is sticky. Withdraw once more, trash the header on
-    #     the card, and re-arm: RIFF/WAVE must NOT be re-verified.
+    # --- phase E: magic_done is cleared per ARM, so a header that goes bad
+    #     between plays is caught on the replay instead of streamed as garbage.
+    #     This phase used to assert the opposite. Sticky magic_done was harmless
+    #     while every arm replayed the same file, and the test recorded that as a
+    #     known weakness; it stops being harmless the moment an arm can name a
+    #     different track, because then a bad slot is never validated at all.
     guard = 0
     while st.state != S_IDLE and guard < 4000:
         step_once(st, rd, 0, None)
         guard += 1
+    check(guard < 4000 and st.state == S_IDLE,
+          "the second withdraw also retires at a sector boundary (%d cycles)"
+          % guard)
+    check(st.magic_done == 1,
+          "magic_done is still 1 while merely retired -- clearing it is the "
+          "arm's job, not the withdraw's, so the check below is really about "
+          "the re-arm")
     trashed = bytearray(card[start_sector])
     trashed[0:12] = b"XXXXYYYYZZZZ"
     card[start_sector] = bytes(trashed)
     words = []
     for _ in range(3200):
         step_once(st, rd, 1, words)
-    check(st.state != S_FAULT and st.magic_done == 1,
-          "a corrupted header on replay is not re-checked: magic_done stays 1 "
-          "and the streamer never faults", "state=%d" % st.state)
-    check(words[:len(frames)] == exp,
-          "so MUSC 0 -> MUSC 1 always replays the same clean track, however "
-          "often it is toggled")
+    check(st.state == S_FAULT,
+          "the re-arm clears magic_done, so the trashed header IS re-verified "
+          "and the streamer faults rather than playing PCM it cannot vouch for",
+          "state=%d magic_done=%d" % (st.state, st.magic_done))
+    check(len(words) == 0,
+          "and the fault lands inside the 44-byte header skip, so zero FIFO "
+          "words escape -- the corruption never reaches the player")
 
 
 def test_control_midsector_retire(cfg):
@@ -636,8 +735,10 @@ def test_control_midsector_retire(cfg):
     # absorbs it without losing a single audio byte. The mutant abandons a sector
     # the arbiter has already granted, then on re-arm mistakes that sector's end
     # pulse for its own, so it skips sector 0 entirely: the header is never read
-    # and every frame from the pulse onward is misaligned -- silently, because
-    # magic_done is already 1.
+    # and the track is lost. It used to be lost SILENTLY, as misaligned garbage,
+    # because magic_done was already 1 from the first play; clearing magic_done
+    # per arm turns that into a loud S_FAULT, which is better but still a lost
+    # track -- the boundary retire stays load-bearing either way.
     start_sector = 0x7000
     frames = make_frames(400)
     wav = build_wav(frames)
@@ -674,13 +775,198 @@ def test_control_midsector_retire(cfg):
     check(words_r[:len(frames)] == exp,
           "real: a %d-cycle de-arm glitch costs nothing -- all %d frames still "
           "come out exactly right" % (PULSE, len(frames)))
-    expect_fail(words_m[:len(frames)] == exp,
-                "mutant: the same glitch corrupts the stream from frame %d "
-                "onward" % next((i for i in range(len(frames))
-                                 if words_m[i] != exp[i]), -1))
+    expect_fail(len(words_m) >= len(frames) and words_m[:len(frames)] == exp,
+                "mutant: the same glitch never reproduces the track -- only %d "
+                "of %d frames ever come out" % (len(words_m), len(frames)))
+    check(st_m.state == S_FAULT,
+          "mutant: and the loss is now LOUD. The re-arm cleared magic_done, so "
+          "the 44 bytes the mutant thinks are a header are really mid-song PCM, "
+          "the RIFF/WAVE check rejects them, and it faults instead of streaming "
+          "garbage that nothing would have reported",
+          "state=%d" % st_m.state)
+
+
+def track_frames(base, n):
+    """Distinct L/R per frame AND a distinct base per track, so a switch that
+    plays the wrong track, or replays the old one, is visible in the words."""
+    return [((base + i) & 0x7FFF, (base + 0x1000 + i) & 0x7FFF) for i in range(n)]
+
+
+def test_track_switch(cfg):
+    print("\n[9] per-image track switch: retire at the boundary, retarget, re-arm")
+    sec_a, sec_b = 0x4000, 0x9000
+    frames_a = track_frames(0x1000, 300)     # 1200 PCM bytes -> 3 sectors
+    frames_b = track_frames(0x3000, 250)     # different track, different length
+    wav_a, wav_b = build_wav(frames_a), build_wav(frames_b)
+    card = build_card(wav_a, sec_a)
+    card.update(build_card(wav_b, sec_b))
+    st = AudioStream(cfg, sec_a, len(wav_a))
+    rd = SdReader(card)
+    exp_b = expected_words(frames_b)
+
+    run(st, rd, 700)
+    check(st.state == S_READ and st.pcm_cnt > 0 and st.magic_done == 1,
+          "track A is playing and past its own header before the switch "
+          "(state=%d pcm_cnt=%d)" % (st.state, st.pcm_cnt))
+    check(rd.state == SdReader.DELIVER and 0 < rd.idx < SECTOR - 1,
+          "the switch is requested part-way through a GRANTED sector, which is "
+          "exactly the case an in-place retarget would get wrong",
+          "reader state=%d idx=%d" % (rd.state, rd.idx))
+    sectors_at_switch = rd.sectors_read
+
+    # sd_card_bmp's handshake: track_pending drops start, the streamer retires at
+    # the sector boundary, stream_idle comes back, the live pair is rewritten,
+    # and start rises again.
+    tail, c = [], 0
+    while not st.stream_idle and c < 4000:
+        step_once(st, rd, 0, tail)
+        c += 1
+    check(st.stream_idle,
+          "start falling retires the streamer to S_IDLE %d cycles later, on the "
+          "sector's end pulse rather than the cycle start goes low" % c)
+    check(c <= SECTOR + 8,
+          "the retire costs at most the sector in flight: %d cycles against a "
+          "%d-byte sector at one byte per clock, so under one sector of latency "
+          "(~184 us real) whatever point in the sector the switch lands on"
+          % (c, SECTOR))
+    check(rd.sectors_read == sectors_at_switch,
+          "no NEW sector is granted while retiring -- the port is handed back "
+          "rather than left holding a request nobody will consume")
+    check(len(tail) <= FRAMES_PER_SECTOR,
+          "track A's abandoned tail is at most one sector: %d stale words "
+          "(<= %d), drained unheard in <= %.1f ms before B's first frame, so "
+          "the splice costs a few milliseconds and is not a gap"
+          % (len(tail), FRAMES_PER_SECTOR, len(tail) / 48000.0 * 1000.0))
+
+    st.retarget(sec_b, len(wav_b))
+
+    words_b = []
+    for _ in range(3200):
+        step_once(st, rd, 1, words_b)
+    check(words_b[:len(frames_b)] == exp_b,
+          "track B comes out exactly and frame-aligned from its OWN byte 0 -- "
+          "not from A's drop point, and not shifted by A's abandoned tail")
+    check(st.magic_done == 1,
+          "and B's RIFF/WAVE header was validated on its own arm rather than "
+          "inherited from A")
+    check(rd.sectors_read > sectors_at_switch,
+          "B really was read off the card (%d sectors granted in total)"
+          % rd.sectors_read)
+
+
+def test_control_switch_without_handshake(cfg):
+    print("\n[10] NEGATIVE CONTROL: rewriting the table mid-sector instead of retiring")
+    # Track B's RIFF header is corrupt. Through the handshake in [9] that is
+    # caught, because the arm clears magic_done and the check runs against B's
+    # own first 44 bytes. Through the mutant -- rewrite wav_start_sector and
+    # wav_size while a granted sector is in flight, start never falling -- the
+    # streamer never re-arms, magic_done stays 1 from track A, B's header is
+    # never looked at, and B's PCM is streamed as though it had been validated.
+    # This is the failure the handshake exists to prevent.
+    sec_a, sec_b = 0x4000, 0x9000
+    frames_a = track_frames(0x1000, 300)
+    frames_b = track_frames(0x3000, 250)
+    wav_a = build_wav(frames_a)
+    wav_b = build_wav(frames_b, riff=b"XXXX", wave=b"YYYY")
+
+    def two_track_card():
+        card = build_card(wav_a, sec_a)
+        card.update(build_card(wav_b, sec_b))
+        return card
+
+    # --- real: switch through the retire / retarget / re-arm handshake.
+    st_r = AudioStream(cfg, sec_a, len(wav_a))
+    rd_r = SdReader(two_track_card())
+    run(st_r, rd_r, 700)
+    guard = 0
+    while not st_r.stream_idle and guard < 4000:
+        step_once(st_r, rd_r, 0, None)
+        guard += 1
+    check(st_r.stream_idle, "real: the handshake retires before retargeting")
+    st_r.retarget(sec_b, len(wav_b))
+    words_r = []
+    for _ in range(3200):
+        step_once(st_r, rd_r, 1, words_r)
+
+    # --- mutant: rewrite the inputs in place, start never falls.
+    st_m = AudioStream(cfg, sec_a, len(wav_a))
+    rd_m = SdReader(two_track_card())
+    run(st_m, rd_m, 700)
+    st_m.wav_start_sector = sec_b
+    st_m.wav_size = len(wav_b)
+    words_m = []
+    for _ in range(3200):
+        step_once(st_m, rd_m, 1, words_m)
+
+    check(st_r.state == S_FAULT and len(words_r) == 0,
+          "real: the corrupt track B is caught on its own arm -- S_FAULT with "
+          "zero words out, so dbg_fault reads 1 on the 7-segment and the chain "
+          "is silent rather than wrong",
+          "state=%d words=%d" % (st_r.state, len(words_r)))
     expect_fail(st_m.state == S_FAULT,
-                "mutant: the damage is SILENT garbage, not a fault -- magic_done "
-                "is already 1 so the skipped header is never noticed")
+                "mutant: the same corrupt track B is NEVER checked -- still "
+                "state %d, because magic_done was inherited from track A and "
+                "nothing ever cleared it" % st_m.state)
+    check(len(words_m) > 0,
+          "mutant: and it streams anyway -- %d words of unvalidated PCM reach "
+          "the player, which is precisely the silent-garbage case the handshake "
+          "removes" % len(words_m))
+
+
+def test_fault_recovers_on_switch(cfg):
+    print("\n[11] a rejected track costs only its own picture, not the other three")
+    sec_bad, sec_good = 0x5000, 0xA000
+    frames_good = track_frames(0x2000, 260)
+    wav_bad = build_wav(track_frames(0x1000, 200), riff=b"NOPE", wave=b"XXXX")
+    wav_good = build_wav(frames_good)
+    card = build_card(wav_bad, sec_bad)
+    card.update(build_card(wav_good, sec_good))
+    exp_good = expected_words(frames_good)
+
+    st = AudioStream(cfg, sec_bad, len(wav_bad))
+    rd = SdReader(card)
+    run(st, rd, 200)
+    check(st.state == S_FAULT, "the bad track is rejected on its arm")
+
+    sectors_at_fault = rd.sectors_read
+    run(st, rd, 1000, start=1)
+    check(st.state == S_FAULT and rd.sectors_read == sectors_at_fault,
+          "and it stays rejected while armed, without spinning the shared SD "
+          "port (%d sectors granted, unchanged over 1000 clocks)"
+          % rd.sectors_read)
+
+    c = 0
+    while not st.stream_idle and c < 100:
+        step_once(st, rd, 0, None)
+        c += 1
+    check(st.stream_idle,
+          "start falling retires S_FAULT to S_IDLE in %d cycles -- this is the "
+          "one line that makes the fault non-terminal" % c)
+
+    st.retarget(sec_good, len(wav_good))
+    words = []
+    for _ in range(3200):
+        step_once(st, rd, 1, words)
+    check(words[:len(frames_good)] == exp_good,
+          "so the NEXT picture still gets its own music: the good track plays "
+          "exactly and frame-aligned after the bad one was rejected")
+
+    # --- mutant: the pre-change terminal S_FAULT.
+    st_m = AudioStreamFaultTerminal(cfg, sec_bad, len(wav_bad))
+    rd_m = SdReader(card)
+    run(st_m, rd_m, 200)
+    check(st_m.state == S_FAULT, "mutant reaches the same fault on the same arm")
+    c = 0
+    while not st_m.stream_idle and c < 100:
+        step_once(st_m, rd_m, 0, None)
+        c += 1
+    expect_fail(st_m.stream_idle,
+                "mutant: S_FAULT ignores !start, so stream_idle never comes "
+                "back -- sd_card_bmp's handshake would wait on it forever, "
+                "track_pending would stay set, start would stay low, and every "
+                "remaining picture would be silent with nothing to say why")
+    check(st_m.state == S_FAULT,
+          "mutant: still in S_FAULT after %d cycles of start held low" % c)
 
 
 def main():
@@ -699,6 +985,9 @@ def main():
     test_control_unusable_size(cfg)
     test_withdraw_and_rearm(cfg)
     test_control_midsector_retire(cfg)
+    test_track_switch(cfg)
+    test_control_switch_without_handshake(cfg)
+    test_fault_recovers_on_switch(cfg)
 
     print("\n" + "=" * 72)
     if FAILURES:

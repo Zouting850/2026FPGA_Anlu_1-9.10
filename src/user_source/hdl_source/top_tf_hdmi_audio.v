@@ -8,6 +8,10 @@ module top(
     input       [3:0]           sw,             // 拨码开关：sw[2:0] (SW1-3) 选转场特效，sw[3] (SW4) 屏蔽滚动字幕（ON=隐藏，与 SW1-3 极性相反）
     input                       uart_rx,        // 串口屏 -> FPGA，D14 (J1 pin1)，4P TTL 飞线（PULLUP）
     output                      uart_tx,        // FPGA -> 串口屏，G11 (J1 pin2)，飞线；Stage 1 恒为空闲高
+    input                       uart_pc_rx,     // PC(Type-C/CH340) -> FPGA，F12；第二路独立 UART，与 J1 串口屏无关
+    input                       emg_in_manual,  // 应急硬线 T1：J2 pin5 = M3，手报按钮，PULLUP，动作拉低
+    input                       emg_in_auto,    // 应急硬线 T2：J2 pin6 = M4，烟感/温感回路，PULLUP，动作拉低
+    output                      spk,            // 无源蜂鸣器 H11：方波驱动，通断受板上 SW5
     output      [3:0]           led,            // 链路诊断，高电平点亮，见下面「串口链路诊断 LED」
 
     output [5:0]                seg_sel,
@@ -45,6 +49,85 @@ parameter BUF3_ADDR     = 24'd921600;
 // source switch -- there is no DIP switch or key gesture for it, so flipping this
 // parameter and re-synthesising is how you get the old build back.
 parameter AUDIO_SRC_DEFAULT = 1'b0;
+
+// PC text-subtitle channel master switch. 1 = the second UART (uart_pc_rx, F12)
+// feeds the marquee overlay so a PC can type an ASCII banner; 0 = pc_en is tied
+// low, the ASCII render arm is never selected and the marquee overlay collapses
+// to bit-identical with the build that predates this channel. This is the
+// one-line retreat for the whole PC-text feature: flip to 0 and re-synthesise.
+//
+// Currently 0, and not because the channel is broken. The four-track audio table
+// added 262 registers, taking the device from 88.09% to 92.10% slices, and at
+// that density place-and-route deadlocked: two auto-duplicated high-fanout
+// registers were packed into the same tile and both claimed wire segment
+// x35y55_e2beg4 (PHY-8023, then RUN-8102 after 125 rip-up iterations failed to
+// escape). Timing was never the problem -- place setup was +1395 ps with zero
+// violated endpoints. Extension requirement (2) audio-video linkage is a named
+// contest requirement and this channel is not, so this one pays. It is worth
+// roughly 2000 le, against the ~376 slices the deadlock needed.
+parameter PC_TEXT_ENABLE = 1'b0;
+
+// Second command source: a PC talking the same TJC framed protocol into the
+// on-board CH340 (Type-C -> F12), so the board is controllable before the serial
+// screen is wired up. It is a second uart_screen_ctrl instance, not a change to
+// the J1 one -- D14/G11 keep every function they have today. Measured: at the gate
+// stage this instance is 216 lut / 126 seq / 0 BRAM / 0 DSP and syn #reg
+// 7562 -> 7688 is exactly those 126; after place&route the hierarchy row reads
+// 245 le / 210 lut / 137 seq, against 276 le / 224 lut / 123 seq for the J1 twin.
+// Setting this to 0 collapses the whole pc_cmd_* bundle to constants, which leaves
+// the second instance with zero loads and gets it pruned -- probed on a real run:
+// the row disappears and #reg returns to exactly 7562. See the merge point below
+// for why the gating covers the command *values* and not just the strobes.
+parameter PC_CMD_ENABLE = 1'b1;
+
+// Emergency takeover master switch: the whole 应急发布 feature -- the fusion
+// block, the full-screen alarm layer, the siren, the buzzer and the command
+// freeze -- hangs off this one bit. It is the one-line retreat for a feature that
+// touches four clock domains, and it defaults to 1 because extension requirement
+// (3) names emergency information dissemination outright.
+//
+// The gate is on every load of all three outputs (emg_state / emg_tgl /
+// vol_level), not just on the strobes. Gating only a strobe leaves the value bus
+// with a live reader, synthesis keeps the register, and "one-line retreat" becomes
+// a lie -- this project has already been caught doing exactly that on led[3].
+//
+// Input gating is NOT enough for a pure combinational layer. With this parameter at
+// 0 and every input wire tied to a constant, u_emergency_ctrl, u_alarm_siren and
+// u_buzzer_beep all left the area report -- but the alarm layer stayed, still
+// holding 202 lut and 12 seq, because its frame counter and raster tracker are
+// free-running off I_de and no amount of constant propagation on I_en gets them
+// removed. That reading came off the gated-form report during this probe and has
+// since been overwritten; the two reports that survive (below) prove the fixed
+// shape. Re-producing the leak is one line: delete this guard and re-synthesise at
+// 0. The deletion is structural, not a hope about what the tool folds.
+//
+// Proof stays the area hierarchy row, never the parameter value: at 0 all four
+// rows must be absent from syn_1/*_gate.area -- u_emergency_ctrl, u_buzzer_beep,
+// and the two generate-scoped ones, which the report names g_alarm_overlay$
+// u_alarm_overlay and g_siren$u_alarm_siren (the whole scope disappears, not just
+// the instance). tools/sim_emergency.py Pass H asserts the structural half of that
+// against this file's text; the four rows close the other.
+//
+// The siren is behind a generate for a different reason: it deletes itself when
+// gated, but the gate leaves S_phase_acc[31] without a driver and TD reports a
+// fresh HDL-5314. A retreat build must warn exactly as loudly as the shipped one,
+// or no later number is readable: measured 56 each, equal once "(NNNN)" is cut.
+//
+// Both halves are on disk, because the report is overwritten by the next build and
+// a number nobody can re-read is not evidence: _build_logs/area_emg1_20260913_214421.txt
+// (this value, four rows present, #reg 7869) and area_emg0_retreat_20260913_215258.txt
+// (at 0, four rows absent, #reg 7692, still exactly 56 warnings).
+parameter EMERGENCY_ENABLE = 1'b1;
+
+// Carousel interval out of reset, in whole seconds, until a SPED command
+// overrides it. It is passed down to sd_card_bmp so the clk-domain latch and the
+// sd_card_clk-domain counter come out of reset already agreeing. 1 is not an
+// arbitrary default: it is the interval this design has always had, and the only
+// one that is self-consistent with video_transition.v's durations (see the
+// comment there about 12/13/14 being excluded). Never sending SPED is the
+// zero-traffic retreat and costs nothing; changing this parameter is how you
+// move the power-on interval itself.
+parameter AUTO_SEC_DEFAULT = 3'd1;
 
 wire Sdr_init_done;
 wire Sdr_init_ref_vld;
@@ -155,7 +238,39 @@ reg         sw4_v0;
 reg         sw4_v1;
 reg         vs_d;
 
-// ---- 串口屏控制：uart_screen_ctrl 的 clk 域命令效果 ----
+// ---- 应急接管 ----
+// emg_state / emg_tgl / vol_level are the three outputs of the fusion block, and
+// every one of them is read here only through an EMERGENCY_ENABLE gate, so a
+// retreated build leaves the instance with zero loads (see the parameter above).
+wire [2:0]  emg_state_raw;
+wire        emg_tgl_raw;
+wire [1:0]  vol_level_raw;
+wire [2:0]  emg_state;
+wire        emg_tgl;
+wire [1:0]  vol_level;
+wire        emg_hold;              // clk 域：告警期间冻结所有普通命令
+wire [23:0] vout_data_alarm;
+
+// Two crossings out of the clk domain, deliberately different, and the difference
+// is the deliverable: sound must not wait for a frame boundary, pixels must not
+// change before one. tools/sim_emergency.py Pass A measures both latencies.
+//
+// The buzzer is not fed from here at all. It has no reason to cross: buzzer_beep
+// runs on clk, the same domain emergency_ctrl publishes in, so its path is one
+// synchroniser shorter than this one. Only the siren needs the video_clk copy,
+// because a PCM sample has to be muxed into a video_clk stream.
+reg         emg_act_s0,  emg_act_v1;        // 裸 2FF -> 警笛 arm 选择（快路径）
+reg  [1:0]  emg_type_s0, emg_type_v1;       // 同一条快路径上的类型码 -> 警笛节奏
+reg         emg_tgl_s0,  emg_tgl_s1, emg_tgl_s2;
+reg  [2:0]  emg_state_stg;                  // data+toggle：toggle 边沿到达时锁一次
+reg  [2:0]  emg_state_frame;                // 帧原子生效 -> alarm_overlay
+reg  [1:0]  vol_s0,    vol_v1;              // 裸 2FF -> 三级数字音量
+reg         emg_hold_s0, emg_hold_sd;       // 裸 2FF -> sd_card_clk，掐实体键
+
+// ---- 串口屏控制：命令效果。两个源（J1 串口屏 D14、Type-C 上位机 F12）各自引出
+// 一组 j1_cmd_* / pc_cmd_*，在两个实例之后的唯一合并点汇成下面的 cmd_*。合并点
+// 以下的所有消费者（亮度合并、锁存块、toggle-CDC、2FF、cmd_any_set）都不知道
+// 有两个源，一行未改。
 wire        cmd_next_pulse;
 wire        cmd_auto_pulse;
 wire        cmd_bright_cycle_pulse;
@@ -173,8 +288,67 @@ wire        cmd_font;
 wire        cmd_font_set;
 wire        cmd_audio;
 wire        cmd_audio_set;
+wire [3:0]  cmd_speed;
+wire        cmd_speed_set;
+// ALRM / VOLM：合并点下面唯一**不**被 emg_hold 冻结的两条。告警期间必须仍然收得到
+// 解除指令与音量指令，否则冻结就成了锁死。
+wire [1:0]  cmd_emg;
+wire        cmd_emg_set;
+wire [1:0]  cmd_vol;
+wire        cmd_vol_set;
 wire        dbg_rx_toggle;
 wire        dbg_rx_ff;
+
+// 源 1：J1 串口屏（D14 / G11），原功能一字未改。
+wire        j1_cmd_next_pulse;
+wire        j1_cmd_auto_pulse;
+wire        j1_cmd_bright_cycle_pulse;
+wire [2:0]  j1_cmd_bright_set;
+wire        j1_cmd_bright_set_v;
+wire [3:0]  j1_cmd_mode;
+wire        j1_cmd_mode_set;
+wire        j1_cmd_marquee;
+wire        j1_cmd_marquee_set;
+wire [1:0]  j1_cmd_img_sel;
+wire        j1_cmd_img_sel_set;
+wire [3:0]  j1_cmd_filt;
+wire        j1_cmd_filt_set;
+wire        j1_cmd_font;
+wire        j1_cmd_font_set;
+wire        j1_cmd_audio;
+wire        j1_cmd_audio_set;
+wire [3:0]  j1_cmd_speed;
+wire        j1_cmd_speed_set;
+wire [1:0]  j1_cmd_emg;
+wire        j1_cmd_emg_set;
+wire [1:0]  j1_cmd_vol;
+wire        j1_cmd_vol_set;
+
+// 源 2：Type-C 上位机（F12），协议与 J1 那路逐字节相同。
+wire        pc_cmd_next_pulse;
+wire        pc_cmd_auto_pulse;
+wire        pc_cmd_bright_cycle_pulse;
+wire [2:0]  pc_cmd_bright_set;
+wire        pc_cmd_bright_set_v;
+wire [3:0]  pc_cmd_mode;
+wire        pc_cmd_mode_set;
+wire        pc_cmd_marquee;
+wire        pc_cmd_marquee_set;
+wire [1:0]  pc_cmd_img_sel;
+wire        pc_cmd_img_sel_set;
+wire [3:0]  pc_cmd_filt;
+wire        pc_cmd_filt_set;
+wire        pc_cmd_font;
+wire        pc_cmd_font_set;
+wire        pc_cmd_audio;
+wire        pc_cmd_audio_set;
+wire [3:0]  pc_cmd_speed;
+wire        pc_cmd_speed_set;
+wire [1:0]  pc_cmd_emg;
+wire        pc_cmd_emg_set;
+wire [1:0]  pc_cmd_vol;
+wire        pc_cmd_vol_set;
+wire        dbg_pc_cmd_toggle;
 
 // mode/marquee 覆盖：clk 域锁存屏幕设定值，物理拨码一旦变动即清除覆盖
 // （last-writer-wins 兜底，两端互为退路）。ovr_en=0 时下面的 trans_mode /
@@ -222,19 +396,53 @@ reg         music_en;
 reg         music_en_v0, music_en_v1;
 reg         music_en_s0, music_en_s1;
 
-// next/auto/img 命令脉冲 clk -> sd_card_clk 的 toggle-CDC：clk 域每来一条命令翻转
-// 一个 toggle，sd_card_clk 域 2FF 同步后用 s1^s2 还原成单周期脉冲。img 的 2-bit
+// next/auto/img/speed 命令脉冲 clk -> sd_card_clk 的 toggle-CDC：clk 域每来一条命令
+// 翻转一个 toggle，sd_card_clk 域 2FF 同步后用 s1^s2 还原成单周期脉冲。img 的 2-bit
 // 目标值用 data+toggle 同步（数据准静态、人类速率，toggle 边沿到达时 img_sel_s1
-// 已稳定 ≥2 拍）。
-reg         next_tgl, auto_tgl, img_tgl;
+// 已稳定 ≥2 拍）。speed 的 4-bit 轮播间隔走完全相同的 data+toggle，因为它同样是
+// 人类速率的准静态值，而且同样必须在 toggle 边沿之前稳定——sd_card_bmp 会把它
+// 减一后存进 sec_target_m1。
+reg         next_tgl, auto_tgl, img_tgl, spd_tgl;
 reg  [1:0]  img_sel_lat;
+reg  [3:0]  speed_lat;
 reg         next_tgl_s0, next_tgl_s1, next_tgl_s2;
 reg         auto_tgl_s0, auto_tgl_s1, auto_tgl_s2;
 reg         img_tgl_s0, img_tgl_s1, img_tgl_s2;
+reg         spd_tgl_s0, spd_tgl_s1, spd_tgl_s2;
 reg  [1:0]  img_sel_s0, img_sel_s1;
+reg  [3:0]  speed_s0, speed_s1;
 wire        cmd_next_pulse_sd    = next_tgl_s1 ^ next_tgl_s2;
 wire        cmd_auto_pulse_sd    = auto_tgl_s1 ^ auto_tgl_s2;
 wire        cmd_img_sel_pulse_sd = img_tgl_s1  ^ img_tgl_s2;
+wire        cmd_speed_pulse_sd   = spd_tgl_s1  ^ spd_tgl_s2;
+
+// PC 文字字幕通道 clk -> video_clk 的跨域。复用本文件里两个已验证的惯用法，不
+// 新造原语：
+//   - pc_text_en（1bit 准静态电平，PCTX 命令置起/清零）走裸 2FF，与 marq_ovr /
+//     music_en 同一处理；
+//   - pc_char_buf(32×7) + pc_n_cells(6bit) 走 data+toggle（与 img_sel 同一处理）：
+//     文字是人类速率、准静态，toggle 边沿（pc_text_toggle，每次 TEXT 提交翻转）
+//     到达 video_clk 时数据已稳定 ≥2 拍，pc_tgl_edge 把 staging 锁一次；
+//   - 最后 staging 在 video_frame_start 帧原子锁进 frame 寄存器（与 filt_frame /
+//     font_frame 同一纪律），保证一帧之内横幅文字恒定、不撕。
+// pc_en_gated 是 PC 通道的总退路：PC_TEXT_ENABLE=0 时它恒 0，marquee_overlay 的
+// ASCII 臂永不选中，整条链路与加这条通道之前逐位一致。
+wire        pc_text_en;
+wire [223:0] pc_char_buf;
+wire [5:0]  pc_n_cells;
+wire        pc_text_toggle;
+wire        dbg_pc_rx_toggle;
+wire        dbg_pc_commit_toggle;
+
+reg         pc_en_v0, pc_en_v1;          // 裸 2FF on the quasi-static level
+reg         pc_tgl_s0, pc_tgl_s1, pc_tgl_s2;  // 3FF on the commit toggle
+wire        pc_tgl_edge = pc_tgl_s1 ^ pc_tgl_s2;
+reg  [223:0] pc_buf_stg;                  // staging, latched on toggle edge
+reg  [5:0]  pc_cells_stg;
+reg         pc_en_frame;                  // frame-atomic working regs
+reg  [223:0] pc_buf_frame;
+reg  [5:0]  pc_cells_frame;
+wire        pc_en_gated = PC_TEXT_ENABLE & pc_en_frame;
 
 // 转场模式：屏幕覆盖优先，否则退回已验证的物理项 ~sw_v1（零扩展成 4 位，值域
 // 仍是 0..7，逐位不变；8..F 只能从串口到达）
@@ -263,7 +471,8 @@ wire vs_0;
 wire de_0;
 
 // HDMI 1.4b 音频发射相关。audio_valid / audio_left_data / audio_right_data 不再
-// 直接由某一个源驱动，而是下面 music_en_v1 选择的二选一 mux 的输出。
+// 直接由某一个源驱动，而是下面 emg_act_v1 优先、再按 music_en_v1 二选一的 mux 输出，
+// 并且程序臂过一次三级数字音量。
 wire        audio_pll_lock;
 wire        audio_mclk;
 wire        audio_i2s_bclk;
@@ -275,6 +484,9 @@ wire [23:0] tone_right;
 wire        mus_valid;
 wire [23:0] mus_left;
 wire [23:0] mus_right;
+wire        siren_valid;
+wire [23:0] siren_left;
+wire [23:0] siren_right;
 wire        audio_valid;
 wire [23:0] audio_left_data;
 wire [23:0] audio_right_data;
@@ -382,39 +594,242 @@ uart_screen_ctrl #(
     .rst                    (rst_all),
     .uart_rx                (uart_rx),
     .uart_tx                (uart_tx),
-    .cmd_next_pulse         (cmd_next_pulse),
-    .cmd_auto_pulse         (cmd_auto_pulse),
-    .cmd_bright_cycle_pulse (cmd_bright_cycle_pulse),
-    .cmd_bright_set         (cmd_bright_set),
-    .cmd_bright_set_v       (cmd_bright_set_v),
-    .cmd_mode               (cmd_mode),
-    .cmd_mode_set           (cmd_mode_set),
-    .cmd_marquee            (cmd_marquee),
-    .cmd_marquee_set        (cmd_marquee_set),
-    .cmd_img_sel            (cmd_img_sel),
-    .cmd_img_sel_set        (cmd_img_sel_set),
-    .cmd_filt               (cmd_filt),
-    .cmd_filt_set           (cmd_filt_set),
-    .cmd_font               (cmd_font),
-    .cmd_font_set           (cmd_font_set),
-    .cmd_audio              (cmd_audio),
-    .cmd_audio_set          (cmd_audio_set),
+    .cmd_next_pulse         (j1_cmd_next_pulse),
+    .cmd_auto_pulse         (j1_cmd_auto_pulse),
+    .cmd_bright_cycle_pulse (j1_cmd_bright_cycle_pulse),
+    .cmd_bright_set         (j1_cmd_bright_set),
+    .cmd_bright_set_v       (j1_cmd_bright_set_v),
+    .cmd_mode               (j1_cmd_mode),
+    .cmd_mode_set           (j1_cmd_mode_set),
+    .cmd_marquee            (j1_cmd_marquee),
+    .cmd_marquee_set        (j1_cmd_marquee_set),
+    .cmd_img_sel            (j1_cmd_img_sel),
+    .cmd_img_sel_set        (j1_cmd_img_sel_set),
+    .cmd_filt               (j1_cmd_filt),
+    .cmd_filt_set           (j1_cmd_filt_set),
+    .cmd_font               (j1_cmd_font),
+    .cmd_font_set           (j1_cmd_font_set),
+    .cmd_audio              (j1_cmd_audio),
+    .cmd_audio_set          (j1_cmd_audio_set),
+    .cmd_speed              (j1_cmd_speed),
+    .cmd_speed_set          (j1_cmd_speed_set),
+    .cmd_emg                (j1_cmd_emg),
+    .cmd_emg_set            (j1_cmd_emg_set),
+    .cmd_vol                (j1_cmd_vol),
+    .cmd_vol_set            (j1_cmd_vol_set),
     .dbg_rx_toggle          (dbg_rx_toggle),
     .dbg_rx_ff              (dbg_rx_ff)
 );
 
+// Type-C 上位机源：同一个解析器、同一套协议（关键字 + " n" + 三个 0xFF），
+// 只是换了根线。串口屏还没接的时候，电脑就是控制面；屏幕插上后两路并存，
+// 互不影响，也不共享任何状态（每路各自一份成帧计数器）。uart_tx 留空——
+// Stage 1 仍然不发东西，回显是另一件事。
+uart_screen_ctrl #(
+    .CLK_FREQ_HZ (50_000_000),
+    .BAUD        (9600)
+) u_uart_pc_cmd (
+    .clk                    (clk),
+    .rst                    (rst_all),
+    .uart_rx                (uart_pc_rx),
+    .uart_tx                (),
+    .cmd_next_pulse         (pc_cmd_next_pulse),
+    .cmd_auto_pulse         (pc_cmd_auto_pulse),
+    .cmd_bright_cycle_pulse (pc_cmd_bright_cycle_pulse),
+    .cmd_bright_set         (pc_cmd_bright_set),
+    .cmd_bright_set_v       (pc_cmd_bright_set_v),
+    .cmd_mode               (pc_cmd_mode),
+    .cmd_mode_set           (pc_cmd_mode_set),
+    .cmd_marquee            (pc_cmd_marquee),
+    .cmd_marquee_set        (pc_cmd_marquee_set),
+    .cmd_img_sel            (pc_cmd_img_sel),
+    .cmd_img_sel_set        (pc_cmd_img_sel_set),
+    .cmd_filt               (pc_cmd_filt),
+    .cmd_filt_set           (pc_cmd_filt_set),
+    .cmd_font               (pc_cmd_font),
+    .cmd_font_set           (pc_cmd_font_set),
+    .cmd_audio              (pc_cmd_audio),
+    .cmd_audio_set          (pc_cmd_audio_set),
+    .cmd_speed              (pc_cmd_speed),
+    .cmd_speed_set          (pc_cmd_speed_set),
+    .cmd_emg                (pc_cmd_emg),
+    .cmd_emg_set            (pc_cmd_emg_set),
+    .cmd_vol                (pc_cmd_vol),
+    .cmd_vol_set            (pc_cmd_vol_set),
+    .dbg_rx_toggle          (dbg_pc_cmd_toggle),
+    .dbg_rx_ff              ()
+);
+
+// ---- 唯一合并点 ----
+// 为什么值不能跟着选通一起按位 OR：cmd_mode / cmd_filt / cmd_speed / cmd_img_sel /
+// cmd_bright_set 是「数据 + 单拍选通」，两路同拍各发一条时按位 OR 会得到一个谁都没
+// 发过的值（MODE 1 撞 MODE E 就成了 0xF，静默换成另一个转场）。所以选通可以 OR，
+// 数据必须做优先级选择：J1 串口屏优先，Type-C 让路。
+//
+// PC_CMD_ENABLE=0 是这一路的一行退路。门控特意加在**数据也加**而不只加在选通上——
+// 只掐选通的话 cmd_mode 仍无条件读 pc_cmd_mode，那个实例就还有一个负载，综合不会
+// 把它删掉，「一行退路」就成了假话（本工程在 led[3] 上已经栽过一次）。
+wire        pc_next       = PC_CMD_ENABLE & pc_cmd_next_pulse;
+wire        pc_auto       = PC_CMD_ENABLE & pc_cmd_auto_pulse;
+wire        pc_brup       = PC_CMD_ENABLE & pc_cmd_bright_cycle_pulse;
+wire [2:0]  pc_brgt_v     = PC_CMD_ENABLE ? pc_cmd_bright_set : 3'd0;
+wire        pc_brgt_set   = PC_CMD_ENABLE & pc_cmd_bright_set_v;
+wire [3:0]  pc_mode_v     = PC_CMD_ENABLE ? pc_cmd_mode : 4'd0;
+wire        pc_mode_set   = PC_CMD_ENABLE & pc_cmd_mode_set;
+wire        pc_marquee_v  = PC_CMD_ENABLE & pc_cmd_marquee;
+wire        pc_marquee_set= PC_CMD_ENABLE & pc_cmd_marquee_set;
+wire [1:0]  pc_img_sel_v  = PC_CMD_ENABLE ? pc_cmd_img_sel : 2'd0;
+wire        pc_img_sel_set= PC_CMD_ENABLE & pc_cmd_img_sel_set;
+wire [3:0]  pc_filt_v     = PC_CMD_ENABLE ? pc_cmd_filt : 4'd0;
+wire        pc_filt_set   = PC_CMD_ENABLE & pc_cmd_filt_set;
+wire        pc_font_v     = PC_CMD_ENABLE & pc_cmd_font;
+wire        pc_font_set   = PC_CMD_ENABLE & pc_cmd_font_set;
+wire        pc_audio_v    = PC_CMD_ENABLE & pc_cmd_audio;
+wire        pc_audio_set  = PC_CMD_ENABLE & pc_cmd_audio_set;
+wire [3:0]  pc_speed_v    = PC_CMD_ENABLE ? pc_cmd_speed : 4'd0;
+wire        pc_speed_set  = PC_CMD_ENABLE & pc_cmd_speed_set;
+wire [1:0]  pc_emg_v      = PC_CMD_ENABLE ? pc_cmd_emg : 2'd0;
+wire        pc_emg_set    = PC_CMD_ENABLE & pc_cmd_emg_set;
+wire [1:0]  pc_vol_v      = PC_CMD_ENABLE ? pc_cmd_vol : 2'd2;   // 2 = 满音量
+wire        pc_vol_set    = PC_CMD_ENABLE & pc_cmd_vol_set;
+
+// ---- 告警冻结 ----
+// emg_hold 拉高期间，除 ALRM/VOLM 之外的每一条命令选通都被丢掉。目的是「暂停」而不是
+// 「遮挡」：告警图层盖在最上面，普通画面本来就看不见，但如果这期间 MODE/IMGX/NEXT
+// 仍然生效，解除告警时落回的就是另一张图、另一种转场，操作员按下解除后看到的不是他
+// 触发前的那一帧。冻结把接管瞬间的状态原样冻住，解除即逐位还原。
+//
+// 只掐选通、不掐数据：每个消费者都是「选通有效才写锁存」，选通为 0 时数据总线自然无人
+// 读，省掉 11 个多路器。ALRM/VOLM 是唯一的例外，因为「解除」本身就要在告警期间送达——
+// 把它们一起冻掉，接管就成了锁死。
+assign cmd_next_pulse         = (j1_cmd_next_pulse         | pc_next)      & ~emg_hold;
+assign cmd_auto_pulse         = (j1_cmd_auto_pulse         | pc_auto)      & ~emg_hold;
+assign cmd_bright_cycle_pulse = (j1_cmd_bright_cycle_pulse | pc_brup)      & ~emg_hold;
+assign cmd_bright_set_v       = (j1_cmd_bright_set_v       | pc_brgt_set)  & ~emg_hold;
+assign cmd_bright_set         = j1_cmd_bright_set_v ? j1_cmd_bright_set : pc_brgt_v;
+assign cmd_mode_set           = (j1_cmd_mode_set           | pc_mode_set)  & ~emg_hold;
+assign cmd_mode               = j1_cmd_mode_set     ? j1_cmd_mode  : pc_mode_v;
+assign cmd_marquee_set        = (j1_cmd_marquee_set        | pc_marquee_set) & ~emg_hold;
+assign cmd_marquee            = j1_cmd_marquee_set  ? j1_cmd_marquee : pc_marquee_v;
+assign cmd_img_sel_set        = (j1_cmd_img_sel_set        | pc_img_sel_set) & ~emg_hold;
+assign cmd_img_sel            = j1_cmd_img_sel_set  ? j1_cmd_img_sel : pc_img_sel_v;
+assign cmd_filt_set           = (j1_cmd_filt_set           | pc_filt_set)  & ~emg_hold;
+assign cmd_filt               = j1_cmd_filt_set     ? j1_cmd_filt  : pc_filt_v;
+assign cmd_font_set           = (j1_cmd_font_set           | pc_font_set)  & ~emg_hold;
+assign cmd_font               = j1_cmd_font_set     ? j1_cmd_font  : pc_font_v;
+assign cmd_audio_set          = (j1_cmd_audio_set          | pc_audio_set) & ~emg_hold;
+assign cmd_audio              = j1_cmd_audio_set    ? j1_cmd_audio : pc_audio_v;
+assign cmd_speed_set          = (j1_cmd_speed_set          | pc_speed_set) & ~emg_hold;
+assign cmd_speed              = j1_cmd_speed_set    ? j1_cmd_speed : pc_speed_v;
+// 这两条不带 ~emg_hold，见上面的注释。
+assign cmd_emg_set            = j1_cmd_emg_set      | pc_emg_set;
+assign cmd_emg                = j1_cmd_emg_set      ? j1_cmd_emg   : pc_emg_v;
+assign cmd_vol_set            = j1_cmd_vol_set      | pc_vol_set;
+assign cmd_vol                = j1_cmd_vol_set      ? j1_cmd_vol   : pc_vol_v;
+
+// ---- 应急接管：三源融合，一个答案 ----
+// 硬线 T1/T2（J2 M3/M4，PULLUP，动作拉低）与合并后的 ALRM 指令在这里比一次
+// 「最低的非零类型码」，谁活着谁说了算，解除是所有请求者都清空之后的 AND。3FF 同步、
+// 非对称消抖、优先级算术全在 emergency_ctrl.v 里，本块只负责例化、门控和跨域。
+emergency_ctrl #(
+    .EMERGENCY_ENABLE (EMERGENCY_ENABLE),
+    .CLK_FREQ_HZ      (50_000_000),
+    .RELEASE_MS       (20),
+    .MANUAL_TYPE      (2'd2),      // T1 手报 -> 疏散
+    .AUTO_TYPE        (2'd1),      // T2 烟感 -> 火警
+    .BURN_SEC         (0)          // 0 = 烤机序列综合消失；7x24 老化时改这里
+) u_emergency_ctrl (
+    .I_clk          (clk),
+    .I_rst          (rst_all),
+    .I_t1           (emg_in_manual),
+    .I_t2           (emg_in_auto),
+    .I_cmd_emg_set  (cmd_emg_set),
+    .I_cmd_emg      (cmd_emg),
+    .I_cmd_vol_set  (cmd_vol_set),
+    .I_cmd_vol      (cmd_vol),
+    .O_emg_state    (emg_state_raw),
+    .O_emg_tgl      (emg_tgl_raw),
+    .O_vol_level    (vol_level_raw)
+);
+
+// 退路门控：三个输出**全部**过一道 EMERGENCY_ENABLE。只掐选通的话数据总线还有一个读者，
+// 综合就不会删这个实例，「一行退路」就是假话（本工程在 led[3] 上栽过一次，合并点上面
+// 那段注释讲的也是同一件事）。tools/sim_emergency.py Pass H 是对着本文件文本查的。
+wire emg_gate = EMERGENCY_ENABLE;
+assign emg_state  = emg_gate ? emg_state_raw : 3'd0;
+assign emg_tgl    = emg_gate & emg_tgl_raw;
+assign vol_level  = emg_gate ? vol_level_raw : 2'd2;   // 2 = 满音量 = 加这条链路之前
+// 冻结电平。取的是 clk 域的 emg_state[2]，与所有命令锁存同域同拍：解除的那一拍起
+// 普通命令就重新生效，不会再被一条同步链晚放行一两拍。
+assign emg_hold = EMERGENCY_ENABLE & emg_state[2];
+
+// 板载无源蜂鸣器：警笛的第二条独立发声通路，走 H11 直接出声，不碰 HDMI 音频链路。
+// 它留在 clk 域，吃的是上面已经过退路门控的 emg_state / vol_level，所以 EMERGENCY_ENABLE
+// 一条就同时掐掉了它；也因为它不出这个域，硬线触发到喇叭只隔着紧急融合自己的那三级同步，
+// 比屏幕换画面还快（蜂鸣器不等帧边界，见 buzzer_beep.v 头注释）。
+buzzer_beep #(
+    .EMERGENCY_ENABLE (EMERGENCY_ENABLE),
+    .CLK_FREQ_HZ      (50_000_000),
+    .TONE_HZ          (1000),      // 板上谐振未知，上板调这一个参数
+    .WINDOW_MS        (600)
+) u_buzzer_beep (
+    .I_clk    (clk),
+    .I_rst    (rst_all),
+    .I_alarm  (emg_state[2]),
+    .I_type   (emg_state[1:0]),
+    .I_level  (vol_level),
+    .O_beep   (spk)
+);
+
+// PC 文字字幕源：第二路完全独立的 UART（F12），clk 域把整句 ASCII 翻译成
+// pc_text_en / char_buf / n_cells / text_toggle。与上面的串口屏实例没有共享任何
+// 信号，删掉本实例与 uart_pc_rx 约束即可让 PC 通道彻底消失而不影响 J1 串口屏。
+//
+// 但注意：本实例和上面新增的 u_uart_pc_cmd 监听的是**同一根 F12**（uart_pc_rx）。
+// 两者现在互斥，靠的就是 PC_TEXT_ENABLE 默认 0 把本实例整体 prune 掉，而不是任何
+// 硬件仲裁。同时打开会两头一起坏——字幕通道把 MODE/SPED 帧当文字铺到屏上，命令
+// 解析器把整句字幕当成前缀污染的不完整长度而静默丢帧。所以这颗开关是「二选一」，
+// 不是「可叠加」；真要在同一根线上共存，得先加一层帧头区分或改用第二只 UART。
+uart_pc_text #(
+    .CLK_FREQ_HZ (50_000_000),
+    .BAUD        (9600)
+) u_uart_pc_text (
+    .clk               (clk),
+    .rst               (rst_all),
+    .uart_pc_rx        (uart_pc_rx),
+    .pc_text_en        (pc_text_en),
+    .char_buf          (pc_char_buf),
+    .n_cells           (pc_n_cells),
+    .text_toggle       (pc_text_toggle),
+    .dbg_rx_toggle     (dbg_pc_rx_toggle),
+    .dbg_commit_toggle (dbg_pc_commit_toggle)
+);
+
 // ---- 串口链路诊断 LED（高电平点亮，A4/A3/C10/B12）----
-// uart_tx 在 Stage 1 恒为空闲高，没有任何回读，所以这三只是判断「屏幕到底
-// 有没有把字节送进来」的唯一手段，分三层，逐层收窄故障范围：
-//   LED0 闪  = 有字节到达（接线、共地、电平、波特率都对）
-//   LED1 亮  = 最近一个字节是 0xFF（帧终止符收到了，成帧没问题）
-//   LED2 闪  = 有一帧被接受并派发（关键字、大小写、clen、参数全对）
+// uart_tx 在 Stage 1 恒为空闲高，没有任何回读，所以这几只是判断「字节到底有没有
+// 送进来」的唯一手段，分三层，逐层收窄故障范围：
+//   LED0 闪  = J1 那一路有字节到达（接线、共地、电平、波特率都对）
+//   LED1 亮  = J1 那一路最近一个字节是 0xFF（帧终止符收到了，成帧没问题）
+//   LED2 闪  = 有一帧被解析器派发。它吃的是两路**未冻结**选通的并集（见下面定义），
+//              所以串口屏与 Type-C 任一路派发命令都会闪，告警接管期间也照闪——
+//              这一只不区分来源，区分来源看下面。
 // 三只全灭 = 问题在物理链路，不用再查协议；LED0 闪而 LED2 不闪 = 字节进来了
-// 但帧被判非法，去查屏幕端的大小写、尾随空格和终止符。
-// LED3 恒灭，留作后续扩展。
-wire cmd_any_set = cmd_next_pulse | cmd_auto_pulse | cmd_bright_cycle_pulse |
-                   cmd_bright_set_v | cmd_mode_set | cmd_marquee_set |
-                   cmd_img_sel_set | cmd_filt_set | cmd_font_set | cmd_audio_set;
+// 但帧被判非法，去查发送端的大小写、尾随空格和终止符。
+// LED3 闪 = Type-C 命令通道（F12）每收到一个字节翻转一次，dbg_pc_cmd_toggle；
+//   它是这一路唯一的物理观测窗口（同样无回读）。LED2 闪而 LED3 不闪 = 命令是从
+//   串口屏那一路来的。PC_TEXT_ENABLE 置 1 时这只灯让回字幕通道的字节翻转（见下面）。
+// 用两个源各自的**未冻结**选通拼这一句，不吃合并后的 cmd_*：合并选通现在被
+// emg_hold 掐着，若 LED2 也读它，告警接管期间这只灯会恰好停闪——而那正是最需要知道
+// 「字节还在不在进来」的时刻。LED2 的语义是「任一解析器派发了一帧」，与 top 有没有
+// 采纳它是两件事。ALRM/VOLM 也计入，所以接管期间发解除指令仍然看得见闪。
+wire cmd_any_set = j1_cmd_next_pulse | j1_cmd_auto_pulse | j1_cmd_bright_cycle_pulse
+                 | j1_cmd_bright_set_v | j1_cmd_mode_set | j1_cmd_marquee_set
+                 | j1_cmd_img_sel_set | j1_cmd_filt_set | j1_cmd_font_set
+                 | j1_cmd_audio_set | j1_cmd_speed_set | j1_cmd_emg_set
+                 | j1_cmd_vol_set
+                 | pc_next | pc_auto | pc_brup | pc_brgt_set | pc_mode_set
+                 | pc_marquee_set | pc_img_sel_set | pc_filt_set | pc_font_set
+                 | pc_audio_set | pc_speed_set | pc_emg_set | pc_vol_set;
 
 reg led2_toggle;
 always @(posedge clk or posedge rst_all) begin
@@ -422,7 +837,14 @@ always @(posedge clk or posedge rst_all) begin
     else if (cmd_any_set)     led2_toggle <= ~led2_toggle;
 end
 
-assign led = {1'b0, led2_toggle, dbg_rx_ff, dbg_rx_toggle};
+// led[3] 归「当前活着的那一路 PC 侧通道」：字幕通道使能时仍是它的字节观测灯，
+// 否则给 Type-C 命令通道——PC_TEXT_ENABLE=0 时那颗灯本来就恒灭，而 Type-C 这一路
+// 在串口屏接上之前是唯一没有物理观测窗口的地方。写成条件式而不是并起来，是为了
+// PC_TEXT_ENABLE=0 时 dbg_pc_rx_toggle 一个负载都不剩，u_uart_pc_text 继续被 prune
+// （这个保证是 led[3] 这段注释一开始就在讲的那件事）。
+assign led = {PC_TEXT_ENABLE ? dbg_pc_rx_toggle
+                             : (PC_CMD_ENABLE & dbg_pc_cmd_toggle),
+              led2_toggle, dbg_rx_ff, dbg_rx_toggle};
 
 // mode/marquee 覆盖锁存 + 物理拨码变动检测（clk 域）。屏幕命令置 ovr_en 并锁值；
 // 任一物理拨码变动清 ovr_en，物理路径立即重新接管。复位值匹配 PULLUP 空闲态
@@ -472,6 +894,8 @@ always @(posedge clk or posedge rst_all) begin
     if (rst_all) begin
         next_tgl <= 1'b0; auto_tgl <= 1'b0; img_tgl <= 1'b0;
         img_sel_lat <= 2'd0;
+        spd_tgl     <= 1'b0;
+        speed_lat   <= AUTO_SEC_DEFAULT;
     end else begin
         if (cmd_next_pulse) next_tgl <= ~next_tgl;
         if (cmd_auto_pulse) auto_tgl <= ~auto_tgl;
@@ -479,10 +903,15 @@ always @(posedge clk or posedge rst_all) begin
             img_sel_lat <= cmd_img_sel;
             img_tgl     <= ~img_tgl;
         end
+        if (cmd_speed_set) begin
+            speed_lat   <= cmd_speed;
+            spd_tgl     <= ~spd_tgl;
+        end
     end
 end
 
-// sd_card_clk 域：2FF 同步 toggle，s1^s2 还原单周期脉冲；img 选图值同样 2FF 同步。
+// sd_card_clk 域：2FF 同步 toggle，s1^s2 还原单周期脉冲；img 选图值与 speed 轮播
+// 间隔同样 2FF 同步。
 // 复位后 toggle 与同步链都为 0，不会冒出虚假脉冲；这些脉冲与 sd_card_bmp 内部
 // 消抖出的 key_next_press / key_auto_press OR 合并，实体按键仍是兜底。
 // music_en 是人类速率的准静态电平，走裸 2FF（不是 toggle），s1 直接接
@@ -493,13 +922,21 @@ always @(posedge sd_card_clk or posedge rst_all) begin
         auto_tgl_s0 <= 1'b0; auto_tgl_s1 <= 1'b0; auto_tgl_s2 <= 1'b0;
         img_tgl_s0  <= 1'b0; img_tgl_s1  <= 1'b0; img_tgl_s2  <= 1'b0;
         img_sel_s0  <= 2'd0; img_sel_s1  <= 2'd0;
+        spd_tgl_s0  <= 1'b0; spd_tgl_s1  <= 1'b0; spd_tgl_s2  <= 1'b0;
+        speed_s0    <= AUTO_SEC_DEFAULT; speed_s1    <= AUTO_SEC_DEFAULT;
         music_en_s0 <= AUDIO_SRC_DEFAULT; music_en_s1 <= AUDIO_SRC_DEFAULT;
+        emg_hold_s0 <= 1'b0; emg_hold_sd <= 1'b0;
     end else begin
         next_tgl_s0 <= next_tgl; next_tgl_s1 <= next_tgl_s0; next_tgl_s2 <= next_tgl_s1;
         auto_tgl_s0 <= auto_tgl; auto_tgl_s1 <= auto_tgl_s0; auto_tgl_s2 <= auto_tgl_s1;
         img_tgl_s0  <= img_tgl;  img_tgl_s1  <= img_tgl_s0;  img_tgl_s2  <= img_tgl_s1;
         img_sel_s0  <= img_sel_lat; img_sel_s1 <= img_sel_s0;
+        spd_tgl_s0  <= spd_tgl;  spd_tgl_s1  <= spd_tgl_s0;  spd_tgl_s2  <= spd_tgl_s1;
+        speed_s0    <= speed_lat;   speed_s1    <= speed_s0;
         music_en_s0 <= music_en; music_en_s1 <= music_en_s0;
+        // 冻结电平走裸 2FF，不是 data+toggle：它许可的是「实体键还准不准动轮播」这种
+        // 电平语义，丢一个采样只是把门控推迟一拍，而漏掉一个边沿会把门控卡死在半路。
+        emg_hold_s0 <= emg_hold; emg_hold_sd <= emg_hold_s0;
     end
 end
 
@@ -528,6 +965,19 @@ always @(posedge video_clk or posedge rst_all) begin
         font_val_v0 <= 1'b0; font_val_v1 <= 1'b0;           // 0 = 平面字
         filt_frame  <= 4'd0; font_frame  <= 1'b0;
         music_en_v0 <= AUDIO_SRC_DEFAULT; music_en_v1 <= AUDIO_SRC_DEFAULT;
+        // PC 文字通道全部复位为 0：pc_en 出复位即低，横幅在收到 PCTX 1 之前一直
+        // 由原中文标语独占，因此"从不发 PC 命令"就是与加这条通道之前逐位一致的退路。
+        pc_en_v0 <= 1'b0; pc_en_v1 <= 1'b0;
+        pc_tgl_s0 <= 1'b0; pc_tgl_s1 <= 1'b0; pc_tgl_s2 <= 1'b0;
+        pc_buf_stg <= 224'd0; pc_cells_stg <= 6'd0;
+        pc_en_frame <= 1'b0; pc_buf_frame <= 224'd0; pc_cells_frame <= 6'd0;
+        // 应急接管：复位即「无告警、满音量」，所以从不触发就是与加这条链路之前逐位
+        // 一致的退路，和上面 PC 文字通道那一段是同一个道理。
+        emg_act_s0 <= 1'b0; emg_act_v1 <= 1'b0;
+        emg_type_s0 <= 2'd0; emg_type_v1 <= 2'd0;
+        emg_tgl_s0 <= 1'b0; emg_tgl_s1 <= 1'b0; emg_tgl_s2 <= 1'b0;
+        emg_state_stg <= 3'd0; emg_state_frame <= 3'd0;
+        vol_s0 <= 2'd2; vol_v1 <= 2'd2;
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -551,30 +1001,66 @@ always @(posedge video_clk or posedge rst_all) begin
         filt_val_v0 <= filt_val; filt_val_v1 <= filt_val_v0;   // clk -> video_clk 2FF
         font_val_v0 <= font_val; font_val_v1 <= font_val_v0;
         music_en_v0 <= music_en; music_en_v1 <= music_en_v0;   // 裸 2FF，刻意不进下面的帧原子锁存
-        // 帧原子生效：只在帧起点放行，避免算法/字体在帧中途切换撕出横缝
+        // PC 文字通道：pc_text_en 走裸 2FF；char_buf/n_cells 走 data+toggle，toggle
+        // 边沿到达时数据已稳定 ≥2 拍，故 pc_tgl_edge 这一拍把 staging 锁一次。
+        pc_en_v0 <= pc_text_en; pc_en_v1 <= pc_en_v0;
+        pc_tgl_s0 <= pc_text_toggle; pc_tgl_s1 <= pc_tgl_s0; pc_tgl_s2 <= pc_tgl_s1;
+        if (pc_tgl_edge) begin
+            pc_buf_stg   <= pc_char_buf;
+            pc_cells_stg <= pc_n_cells;
+        end
+        // 应急接管的两条路，刻意不同：
+        //   电平+类型 emg_act_v1 / emg_type_v1 —— 裸 2FF，不等帧边界。警笛走这一条：
+        //     告警开始的那半个静音帧是真正要紧的缺陷，所以这里宁可放弃帧原子。类型码
+        //     必须跟电平成对走同一条路，否则接管的头一帧里电平已经是 1、类型码还留在
+        //     帧原子那份 0 上，警笛会先用错节奏响最多 16.80 ms。
+        //   像素 emg_state_stg —— data+toggle，交给下面的帧起点锁存。图层中途换会让
+        //     屏幕撕出一道红/正常之间的横缝。
+        // 蜂鸣器两条都不走，它在 clk 域里直接吃 emg_state，见 buzzer_beep.v。
+        // 两条延迟各测各的，见 tools/sim_emergency.py Pass A。
+        emg_act_s0 <= emg_state[2]; emg_act_v1 <= emg_act_s0;
+        emg_type_s0 <= emg_state[1:0]; emg_type_v1 <= emg_type_s0;
+        vol_s0 <= vol_level;        vol_v1 <= vol_s0;
+        if (emg_tgl_s1 ^ emg_tgl_s2) emg_state_stg <= emg_state;
+        emg_tgl_s0 <= emg_tgl; emg_tgl_s1 <= emg_tgl_s0; emg_tgl_s2 <= emg_tgl_s1;
+        // 帧原子生效：只在帧起点放行，避免算法/字体/PC 文字在帧中途切换撕出横缝
         if (video_frame_start) begin
             filt_frame <= filt_val_v1;
             font_frame <= font_val_v1;
+            pc_en_frame    <= pc_en_v1;
+            pc_buf_frame   <= pc_buf_stg;
+            pc_cells_frame <= pc_cells_stg;
+            emg_state_frame <= emg_state_stg;
         end
         vs_d <= vs;
     end
 end
 
 // ===================== TF 多图扫描与缓存（双缓冲） =====================
+// 接管期间实体键不再翻页：key1/key2 会动轮播、会起 SD 读，而告警承诺的是「解除后落回
+// 触发前那一帧」。emg_hold_sd 自带 EMERGENCY_ENABLE 门控，退路构建里它恒为 0，这两只
+// 键的行为与加这条链路之前逐位相同。
+// key3（亮度）刻意不冻：亮度是 u_video_brightness 上的模拟增益，在告警图层**下面**，
+// 操作员在火场里把它调满是正当需求，且它不碰轮播、不碰 SD。
+wire emg_key_gate = ~emg_hold_sd;
+
 sd_card_bmp #(
     .CLK_FREQ_HZ       (100_000_000),
     .SCAN_START_SECTOR (32'd0),
     .SCAN_MAX_SECTOR   (32'd131071),
-    .SCAN_TARGET_COUNT (3'd4)
+    .SCAN_TARGET_COUNT (3'd4),
+    .AUTO_SEC_DEFAULT  (AUTO_SEC_DEFAULT)
 ) sd_card_bmp_m0(
     .clk               (sd_card_clk),
     .rst               (rst_all),
-    .key_next          (key1),
-    .key_auto          (key2),
+    .key_next          (key1 & emg_key_gate),
+    .key_auto          (key2 & emg_key_gate),
     .cmd_next_pulse    (cmd_next_pulse_sd),
     .cmd_auto_pulse    (cmd_auto_pulse_sd),
     .cmd_img_sel       (img_sel_s1),
     .cmd_img_sel_pulse (cmd_img_sel_pulse_sd),
+    .cmd_speed         (speed_s1),
+    .cmd_speed_pulse   (cmd_speed_pulse_sd),
     .music_req         (music_en_s1),
     .state_code        (state_code),
     .display_valid     (display_valid),
@@ -780,8 +1266,39 @@ marquee_overlay #(
     .I_rgb (vout_data_osd),
     .I_en  (marquee_en),
     .I_3d  (font_frame),
+    .I_pc_en       (pc_en_gated),
+    .I_pc_cells    (pc_cells_frame),
+    .I_pc_char_buf (pc_buf_frame),
     .O_rgb (vout_data)
 );
+
+// 视频链最后一个多路器：盖在标语、OSD 面板、频谱、TF 图之上，它们谁都不用知道告警存在。
+// I_en 吃的是帧原子锁存后的 emg_state_frame[2]，所以图层只能在帧起点出现。
+//
+// 为什么是 generate 而不是「把 I_en 门控成 0 就完事」：这一层是纯组合的直通 mux，
+// 把 I_en 绑成常数 0 之后综合仍然保留了整个实例（实测 202 lut / 12 seq，就是上面
+// EMERGENCY_ENABLE 那段注释里记的数）。它自己的 x_pos/y_pos 光栅跟踪与 fc 帧计数是
+// 跟着 I_de 自由跑的，不受 I_en 门控，常数传播删不掉。generate 才是结构性的删除：
+// 参数为 0 时这个模块根本不参与例化，vout_data_alarm 变成 vout_data 的一根别名，
+// 「退路」这句话才不需要赌工具会不会折叠。
+generate
+if (EMERGENCY_ENABLE) begin : g_alarm_overlay
+    alarm_overlay #(
+        .H_ACTIVE (640),
+        .V_ACTIVE (480)
+    ) u_alarm_overlay (
+        .I_clk  (video_clk),
+        .I_rst  (rst_all),
+        .I_de   (de),
+        .I_rgb  (vout_data),
+        .I_en   (emg_state_frame[2]),
+        .I_type (emg_state_frame[1:0]),
+        .O_rgb  (vout_data_alarm)
+    );
+end else begin : g_no_alarm_overlay
+    assign vout_data_alarm = vout_data;
+end
+endgenerate
 
 frame_read_write #(
     .WRITE_V_FLIP     (1),
@@ -851,8 +1368,8 @@ sdram U3(
     .Sdr_rd_dout       (Sdr_rd_dout)
 );
 
-// ===================== 音频：测试音 / TF 卡 WAV 二选一 =====================
-// Two independent sources feed the HDMI audio core through one mux.
+// ===================== 音频：警笛 / 测试音 / TF 卡 WAV 三选一 =====================
+// Three independent sources feed the HDMI audio core through one mux.
 //
 // Source 0 (music_en_v1 == 0, the AUDIO_SRC_DEFAULT power-up state) is the built-in
 // test tone: hdmi_audio_tone_i2s_64fs runs a DDS + ADSR in the audio_mclk domain
@@ -866,10 +1383,13 @@ sdram U3(
 // them into video_clk. audio_pcm_player emits the continuous 48 kHz valid/sample
 // stream -- including silence on underrun, so the ACR reference never gaps.
 //
-// Both sources therefore produce an unbroken valid stream at all times, which is
-// what makes the bare 2FF select on music_en safe: audio_arc_calculate only
-// counts 48 valids to pace CTS, so a switch costs at most one sample of phase
-// discontinuity and never gaps the ACR reference. No frame-atomic latch here.
+// All three sources therefore produce an unbroken valid stream at all times, which
+// is what makes a bare 2FF select safe here -- including the alarm's, which is why
+// emg_act_v1 is allowed to appear in the audio_valid expression at all:
+// audio_arc_calculate only counts 48 valids to pace CTS, so a switch costs at most
+// one sample of phase discontinuity and never gaps the ACR reference. No
+// frame-atomic latch here. The rule each arm has to obey, and the reason alarm_siren
+// zeroes SAMPLES instead of withholding valid, is in that file's header.
 //
 // The tone generator is instantiated with its MODULE DEFAULT parameters. Do not
 // re-apply an AMP override: the default 24'sd8000000 is the value the envelope
@@ -925,9 +1445,69 @@ audio_pcm_player #(
     .O_audio_right_data (mus_right)
 );
 
-assign audio_valid      = music_en_v1 ? mus_valid : tone_valid;
-assign audio_left_data  = music_en_v1 ? mus_left  : tone_left;
-assign audio_right_data = music_en_v1 ? mus_right : tone_right;
+// Source 2, and the one that outranks the other two: the emergency siren. Pure
+// counters in video_clk -- no card read, no FIFO, no waveform ROM -- because the
+// sound of an alarm must survive a missing or busy TF card. Its enable and its
+// type code come off the FAST 2FF pair, not the frame-atomic copy, for the reason
+// spelled out where those registers are declared.
+//
+// Same generate as the alarm layer below, for the same reason plus one more: with
+// only the input gate, the retreat build pruned this instance from the area report
+// but still elaborated it and reported HDL-5314 on S_phase_acc[31] -- its whole
+// body is inside `else if (EMERGENCY_ENABLE)`, so at 0 nothing drives it. A
+// retreat switch that leaves a fresh warning behind is a retreat switch whose next
+// measurement nobody can read. The else branch drives all three nets to constants,
+// which is also what makes the 4:1 audio mux below fold.
+generate
+if (EMERGENCY_ENABLE) begin : g_siren
+    alarm_siren #(
+        .EMERGENCY_ENABLE (EMERGENCY_ENABLE),
+        .CLK_FREQ_HZ      (25_000_000),
+        .SAMPLE_RATE_HZ   (48_000)
+    ) u_alarm_siren (
+        .I_clk              (video_clk),
+        .I_rst              (rst_all),
+        .I_en               (emg_act_v1),
+        .I_type             (emg_type_v1),
+        .O_audio_valid      (siren_valid),
+        .O_audio_left_data  (siren_left),
+        .O_audio_right_data (siren_right)
+    );
+end else begin : g_no_siren
+    assign siren_valid   = 1'b0;
+    assign siren_left    = 24'd0;
+    assign siren_right   = 24'd0;
+end
+endgenerate
+
+// 三级数字音量。满 / -12 dB / 静音，用算术右移而不是乘法（本工程房规，见
+// video_brightness.v 与 hdmi_audio_tone_i2s_64fs.v:137 那段）。$signed 是关键的一半：
+// 无符号 >> 会把负半周的高位补 0，-1 变成 0x7FFFFF，那是满幅爆裂，是这条通路上最贵
+// 的一种错。-12 dB 而不是 -6 dB：这一档要给的是「整个房间明显轻下来」，扩音设备上
+// 6 dB 只会被听成「稍微轻了一点点」，操作员发了 VOLM 1 却听不出区别就是没做到。
+function [23:0] vol_gain;
+    input [23:0] s;
+    input [1:0]  lvl;
+    begin
+        case (lvl)
+            2'd0:    vol_gain = 24'd0;
+            2'd1:    vol_gain = $signed(s) >>> 2;
+            default: vol_gain = s;
+        endcase
+    end
+endfunction
+
+// 四路优先：警笛 > (WAV | 测试音) x 音量。组合逻辑，不打拍——audio_valid 一旦
+// 比 sample 多延一拍，audio_arc_calculate 数到的 48 个 valid 就和数据错位了。
+wire        S_pgm_valid = music_en_v1 ? mus_valid : tone_valid;
+wire [23:0] S_pgm_left  = vol_gain(music_en_v1 ? mus_left  : tone_left,  vol_v1);
+wire [23:0] S_pgm_right = vol_gain(music_en_v1 ? mus_right : tone_right, vol_v1);
+
+// 警笛不吃增益，这是有意的：VOLM 0 关掉的是标牌的背景音，不是火灾时的告警。
+// tools/sim_emergency.py Pass G 把这条量成了断言。
+assign audio_valid      = emg_act_v1 ? siren_valid   : S_pgm_valid;
+assign audio_left_data  = emg_act_v1 ? siren_left    : S_pgm_left;
+assign audio_right_data = emg_act_v1 ? siren_right   : S_pgm_right;
 
 audio_arc_calculate #(
     .ACR_N         (6144)
@@ -946,7 +1526,7 @@ video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_rst         (rst_all),
     .I_vs          (vs),
     .I_de          (de),
-    .I_rgb         (vout_data),
+    .I_rgb         (vout_data_alarm),
     .O_video_user  (axis_s_user),
     .O_video_valid (axis_s_valid),
     .O_video_last  (axis_s_last),

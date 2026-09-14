@@ -1,0 +1,16 @@
+#[INFO] IpTool V2025.08 (APP main), Windows 64bit (Release), Build 171484 2025/08/11, 10:43:30 Aug 11 2025 on WIN10-204
+#[INFO] Run at Sun Sep 13 00:06:28 2026
+
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/pll_gen.ipc
+#[INFO] The Tool Ip instance xml path: D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/TEMAC_CORE/TEMAC_CORE.xml
+#[INFO] Load instance data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/TEMAC_CORE
+#[INFO] Load Catalog data success for IP Name TEMAC
+#[INFO] Load Component data success from D:/Download/TD/ip/depot/TEMAC_2.0
+#[ERROR] The D:/Download/TD/ip/depot/TEMAC_2.0 not exist upgrade.tcl
+#[INFO] TEMAC_CORE >> Instance Version:2.0.0 Recommend Version:2.0.0
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/clk_pll.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/pll_50.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/rx_pll.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/boardB_eth_frontend/prj/UDP_EXAMPLE/al_ip/fifo_sdr_data_2.ipc
+ipst_gui_select_dialog IP_Status
+ipst_gui_close_dialog IP_Status

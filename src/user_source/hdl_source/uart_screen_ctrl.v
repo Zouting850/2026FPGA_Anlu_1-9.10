@@ -14,20 +14,37 @@
 //     terminated by the TJC convention of three 0xFF bytes. Payload bytes are
 //     always ASCII (never 0xFF), so 0xFF unambiguously means terminator.
 //   - Commands: NEXT, AUTO, BRUP (no arg); BRGT n, MODE n, MARQ n, IMGX n,
-//     FILT n, FONT n, MUSC n.
+//     FILT n, FONT n, MUSC n, SPED n, ALRM n, VOLM n.
+//   - The keyword is FOUR characters, not "up to four". The dispatcher is
+//     `case ({c0, c1, c2, c3})`, so a three-letter keyword misses every arm and
+//     the frame is dropped with no feedback on a link that never reads back.
+//     That is why the emergency pair is ALRM / VOLM rather than the obvious EMG /
+//     VOL: both had to grow to four bytes before they could be received at all.
 //   - MODE and FILT arguments are ONE hex character, '0'-'9' then 'A'-'F' for
 //     10..15, so both code spaces reach 0..15 while every framed command stays
 //     exactly 9 bytes. Lowercase is rejected: the screen project has to send
 //     uppercase. A two-digit argument is not a wider code space, it is a 10
 //     byte frame that clen == 6 turns down.
+//   - SPED's argument is the carousel interval in whole seconds, and the
+//     accepted range is '1'-'8'. The floor is 1, not 0, because the interval
+//     can only ever be stretched: the longest band effect runs WIPE_HOLD 40 +
+//     FADE_IN 8 + WIPE_SETTLE 2 = 50 frames, about 0.83 s at 60 Hz, so the 1 s
+//     interval this design has always had leaves only ~0.17 s of still picture.
+//     Going below it would chain half-finished transitions into one continuous
+//     sweep. 8 is the ceiling because sec_cnt is 3 bits.
 //
 // Every command effect is emitted in THIS clk domain:
 //   - one-clock pulses: cmd_next_pulse / cmd_auto_pulse / cmd_bright_cycle_pulse
 //   - value + one-clock set strobe: cmd_bright_set(+_v), cmd_mode(+_set),
 //     cmd_marquee(+_set), cmd_img_sel(+_set), cmd_filt(+_set), cmd_font(+_set),
-//     cmd_audio(+_set)
+//     cmd_audio(+_set), cmd_speed(+_set), cmd_emg(+_set), cmd_vol(+_set)
 // The top level crosses the pulses into sd_card_clk (toggle-CDC) and the levels
 // into video_clk (2FF), and merges them with the physical keys/switches.
+//
+// cmd_emg / cmd_vol are the two the top level must never freeze. Under an alarm
+// every other command is swallowed at the merge point -- that is what "forced
+// takeover" means -- so if ALRM 0 were frozen with them, the only way out of a
+// command-raised alarm would be a hardline release or a power cycle.
 //
 // Reset polarity follows the project convention (see video_transition.v:73):
 // rst is rst_all at the top, ACTIVE HIGH, sensitivity `posedge rst`, condition
@@ -67,6 +84,12 @@ module uart_screen_ctrl #(
     output reg        cmd_font_set,
     output reg        cmd_audio,              // MUSC n: 1 TF-card WAV / 0 built-in test tone
     output reg        cmd_audio_set,
+    output reg  [3:0] cmd_speed,              // SPED n: carousel interval 1..8 s
+    output reg        cmd_speed_set,
+    output reg  [1:0] cmd_emg,                // ALRM n: 0 release / 1 火警 / 2 疏散 / 3 通用
+    output reg        cmd_emg_set,
+    output reg  [1:0] cmd_vol,                // VOLM n: 2 full / 1 mid / 0 mute
+    output reg        cmd_vol_set,
 
     // ---- link debug: uart_tx is idle-high in Stage 1, so there is no readback
     // and these two are the only way to see whether bytes reach the FPGA at all.
@@ -202,6 +225,12 @@ module uart_screen_ctrl #(
             cmd_font_set           <= 1'b0;
             cmd_audio              <= 1'b0;
             cmd_audio_set          <= 1'b0;
+            cmd_speed              <= 4'd0;
+            cmd_speed_set          <= 1'b0;
+            cmd_emg                <= 2'd0;
+            cmd_emg_set            <= 1'b0;
+            cmd_vol                <= 2'd2;   // full gain, matching emergency_ctrl
+            cmd_vol_set            <= 1'b0;
             dbg_rx_toggle          <= 1'b0;
             dbg_rx_ff              <= 1'b0;
         end else begin
@@ -216,6 +245,9 @@ module uart_screen_ctrl #(
             cmd_filt_set           <= 1'b0;
             cmd_font_set           <= 1'b0;
             cmd_audio_set          <= 1'b0;
+            cmd_speed_set          <= 1'b0;
+            cmd_emg_set            <= 1'b0;
+            cmd_vol_set            <= 1'b0;
 
             if (rx_valid) begin
                 dbg_rx_toggle <= ~dbg_rx_toggle;
@@ -263,6 +295,33 @@ module uart_screen_ctrl #(
                         "MUSC": if (clen == 4'd6 && c4 == " " && (c5 == "0" || c5 == "1")) begin
                                     cmd_audio     <= (c5 == "1");
                                     cmd_audio_set <= 1'b1;
+                                 end
+                        // SPED only stretches the carousel: the longest band
+                        // transition already eats ~0.83 s of the stock 1 s, so
+                        // 1 s is the floor. '0' is rejected on the encoding too
+                        // -- sd_card_bmp keeps the target 3-bit as speed-1, so
+                        // 0 would wrap to 7 and silently mean 8 s, the slowest.
+                        "SPED": if (clen == 4'd6 && c4 == " " && c5 >= "1" && c5 <= "8") begin
+                                    cmd_speed     <= c5 - 8'h30;
+                                    cmd_speed_set <= 1'b1;
+                                 end
+                        // ALRM is the one command whose argument range includes 0,
+                        // because 0 is the release. Codes 1..3 are ordered by
+                        // severity -- 1 火警, 2 疏散, 3 通用 -- and emergency_ctrl
+                        // resolves simultaneous requestors by taking the LOWEST
+                        // non-zero one, so that ordering is load-bearing: swapping
+                        // two codes silently reorders the priority table with no
+                        // compile error to notice.
+                        "ALRM": if (clen == 4'd6 && c4 == " " && c5 >= "0" && c5 <= "3") begin
+                                    cmd_emg     <= c5 - 8'h30;
+                                    cmd_emg_set <= 1'b1;
+                                 end
+                        // VOLM's three codes are gain steps, and unlike every other
+                        // command here its reset value is meaningful (2 = full)
+                        // rather than zero, because 0 is mute.
+                        "VOLM": if (clen == 4'd6 && c4 == " " && c5 >= "0" && c5 <= "2") begin
+                                    cmd_vol     <= c5 - 8'h30;
+                                    cmd_vol_set <= 1'b1;
                                  end
                         default: ;
                         endcase

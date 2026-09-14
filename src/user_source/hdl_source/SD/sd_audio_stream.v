@@ -6,9 +6,13 @@
 // the track start on the first picture instead of after the last one.
 //
 // `start` is the audio source select, not just an arm condition: dropping it
-// (the screen sent MUSC 0, so the built-in test tone takes over) retires this
-// module to S_IDLE at the next sector boundary and stops it requesting the port
-// at all, which also gives the picture loads the whole bandwidth back.
+// retires this module to S_IDLE at the next sector boundary and stops it
+// requesting the port at all. Two things drop it. MUSC 0 (the built-in test tone
+// takes over) drops it for good, which also gives the picture loads the whole
+// bandwidth back. A track switch drops it only until stream_idle is observed,
+// because sd_card_bmp may rewrite wav_start_sector/wav_size while -- and only
+// while -- no granted sector is in flight. Re-arming then restarts whatever
+// track those inputs now name, from its own byte 0.
 //
 // Contract with the offline tool (doc/convert/convert_audio_to_wav.py):
 //   48000 Hz, stereo, 16-bit little-endian, canonical 44-byte RIFF/WAVE header.
@@ -17,8 +21,8 @@
 //   boundary; no cross-sector frame bookkeeping is needed.
 //
 // The card reader does NOT follow FAT32 cluster chains (it advances LBA by +1),
-// so the WAV must be physically contiguous. The offline sync writes MUSIC.WAV
-// first onto a freshly cleaned card to guarantee that.
+// so every WAV must be physically contiguous. The offline sync writes all of
+// them first onto a freshly cleaned card to guarantee that.
 module sd_audio_stream #(
     parameter integer HDR_LEN      = 44,   // canonical WAV header bytes to skip
     // Pause sector reads at a sector boundary once the FIFO write-side holds
@@ -30,12 +34,12 @@ module sd_audio_stream #(
 )(
     input  wire        clk,             // sd_card_clk (100 MHz)
     input  wire        rst,
-    input  wire        start,           // level: music source selected. Dropping it
-                                        // retires to S_IDLE at the next sector
-                                        // boundary; re-arming restarts the track
-                                        // from the top (magic_done stays set).
-    input  wire [31:0] wav_start_sector,// first data sector (LBA) of the WAV
-    input  wire [31:0] wav_size,        // full file size in bytes
+    input  wire        start,           // level: music source selected AND no track
+                                        // switch in flight. Falling retires to S_IDLE
+                                        // at the next sector boundary; re-arming
+                                        // restarts the selected track from the top.
+    input  wire [31:0] wav_start_sector,// first data sector (LBA) of the selected WAV
+    input  wire [31:0] wav_size,        // selected WAV's full file size in bytes
 
     // SD sector-read bus (muxed onto sd_card_top by sd_card_bmp during audio phase)
     output reg         sd_sec_read,
@@ -55,13 +59,22 @@ module sd_audio_stream #(
     // reached the FIFO write side, dbg_fault proves the RIFF/WAVE check rejected
     // whatever sits at wav_start_sector.
     output reg         dbg_ever_we,
-    output wire        dbg_fault
+    output wire        dbg_fault,
+
+    // Retire acknowledgement for the per-image track switch in sd_card_bmp. The
+    // track table there rewrites wav_start_sector/wav_size only while this is
+    // high, because S_IDLE is the one state that is not holding a granted sector
+    // and is not going to read wav_start_sector until `start` rises again. Note
+    // it is NOT "safe to switch because nothing is playing": S_FAULT is also
+    // idle-by-request but reports 0 here, so a rejected track keeps owning the
+    // table until `start` falls and retires it to S_IDLE.
+    output wire        stream_idle
 );
 
 localparam [1:0] S_IDLE  = 2'd0;
 localparam [1:0] S_READ  = 2'd1;
 localparam [1:0] S_WAIT  = 2'd2;   // backpressure: hold between sectors
-localparam [1:0] S_FAULT = 2'd3;   // bad/missing header: silent, terminal
+localparam [1:0] S_FAULT = 2'd3;   // bad/missing header: silent until !start
 
 localparam [5:0] HDR_SKIP = HDR_LEN;   // 44 fits in 6 bits
 
@@ -80,7 +93,8 @@ wire magic_ok = (riff0 == "R") && (riff1 == "I") && (riff2 == "F") && (riff3 == 
                 (wave0 == "W") && (wave1 == "A") && (wave2 == "V") && (wave3 == "E");
 wire wav_usable = (wav_size > (HDR_LEN + 4));
 wire pause_now  = (fifo_wrusedw >= PAUSE_THRESH);
-assign dbg_fault = (state == S_FAULT);
+assign dbg_fault   = (state == S_FAULT);
+assign stream_idle = (state == S_IDLE);
 
 always @(posedge clk or posedge rst) begin
     if (rst) begin
@@ -114,8 +128,14 @@ always @(posedge clk or posedge rst) begin
                         hdr_skip       <= HDR_SKIP;
                         hdr_cnt        <= 6'd0;
                         byte_phase     <= 2'd0;
+                        // Every arm names a possibly different track now, so the
+                        // header is re-checked per arm rather than once per
+                        // power-up. The end-of-song rewind below stays in S_READ
+                        // and never lands here, so a looping track is still
+                        // validated exactly once.
+                        magic_done       <= 1'b0;
                         sd_sec_read_addr <= wav_start_sector;
-                        state          <= S_READ;
+                        state            <= S_READ;
                     end
                 end
             end
@@ -211,7 +231,16 @@ always @(posedge clk or posedge rst) begin
             end
 
             S_FAULT: begin
-                sd_sec_read <= 1'b0;   // silent forever; no WAV / bad header
+                sd_sec_read <= 1'b0;   // silent: no WAV / bad header
+                // No longer terminal. With a single track per card a rejection
+                // meant there was nothing else to play, so latching off forever
+                // was the right answer and cost nothing. Against a per-image
+                // table it would take the other three tracks down with it, so
+                // this retires on !start like S_READ and S_WAIT do, which lets
+                // sd_card_bmp's switch handshake rewrite the table and re-arm.
+                // A bad track now costs only its own picture its music.
+                if (!start)
+                    state <= S_IDLE;
             end
 
             default: begin
