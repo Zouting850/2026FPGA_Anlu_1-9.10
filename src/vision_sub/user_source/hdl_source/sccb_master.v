@@ -36,8 +36,12 @@ module sccb_master
 	output                      ack,        // 事务结束的一个周期脉冲
 	output[15:0]                rd_data,
 	output[4:0]                 nack_cnt,   // 累计 NACK 次数（诊断用）
+	input                       swap,       // 1 = 两线接反，交换 SCL/SDA 的管脚角色
 	// ---- SCCB 物理接口 ----
-	output                      scl,
+	// swap=0：scl 为 push-pull 时钟输出，sda 为开漏双向数据
+	// swap=1：sda 承载时钟（push-pull），scl 承载数据（开漏双向）
+	// 两个端口都必须是 inout，见文件末尾的角色交换段。
+	inout                       scl,
 	inout                       sda
 );
 
@@ -71,10 +75,31 @@ wire                         sda_in;
 wire                         tick;
 wire                         rx_byte;    // 当前字节为"接收"方向
 wire                         nack_byte;  // 当前字节需主机回 NACK
+wire                         mack_byte;  // 当前字节需主机主动回 ACK（读的第 1 个数据字节）
 
-assign sda    = sda_oe ? sda_out : 1'bz;
-assign sda_in = sda;
-assign scl    = scl_r;
+// ------------------------------------------------------------
+// 管脚角色（这是整条链路唯一会"接反"的地方，所以在这里兜底）
+//
+// 硬件背景：改造后的总钻风把 CMOS 的 SCCB 两线引到 FFC 的 TXD/RXD 两个脚上，
+// 转接板又原样透传到 P1-5/P1-7。**逐飞的手册并没有说明哪一根是 SCL**，
+// 所以"TXD 是 SCL 还是 SDA"在实物上是个 50/50 的赌注，接反的后果是：
+//   总线毫无应答 → 读版本号得到 FFFF → 传感器停在 0x0305 都没写的上电默认
+//   （752x480、AEC 开），而 DVP 那 11 根线照常工作，现象极具迷惑性。
+//
+// 兜底办法：把两线的角色做成可交换。swap=1 时
+//   时钟 scl_r      → sda 端口（push-pull，必须是 push-pull，开漏时钟上升沿太慢）
+//   数据 sda_oe/out → scl 端口（开漏，靠上拉）
+// 于是 FPGA 侧不需要知道实物哪根是哪根，由 mt9v034_cfg 探测出来再锁定。
+//
+// 注意：交换后承载数据的那个端口需要上拉，所以 pin.adc 里两个脚都配 PULLUP。
+// 也注意：sda_oe=0 表示"释放"，此时端口为高阻，绝不能强行驱动高电平——
+// 这是 SCCB 开漏语义，与交换方向无关。
+// ------------------------------------------------------------
+wire sda_drv = sda_oe ? sda_out : 1'bz;
+
+assign scl    = swap ? sda_drv : scl_r;
+assign sda    = swap ? scl_r   : sda_drv;
+assign sda_in = swap ? scl     : sda;
 
 assign busy      = busy_r;
 assign ack       = ack_r;

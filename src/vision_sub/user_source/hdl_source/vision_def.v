@@ -41,6 +41,8 @@
 `define RESET_WAIT_CNT   32'd50000
 // 两次寄存器写之间的间隔：100us @50MHz
 `define WRITE_GAP_CNT    32'd5000
+// 极性探测两次尝试之间的静默：100us @50MHz（总线回到空闲即可）
+`define PROBE_GAP_CNT    32'd5000
 // 配置完成前的稳定等待：20ms @50MHz
 `define SETTLE_WAIT_CNT  32'd1000000
 

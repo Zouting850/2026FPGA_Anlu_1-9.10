@@ -19,6 +19,10 @@ things that actually decide whether the board works the first time it is powered
   3. mt9v034_cfg.v writes the register table in order with the right values,
      then reads R0x00 and requires 0x1324. R0x0D must keep bits[9:8] set
      (0x0305), not 0x0005 -- the datasheet marks them "always 1".
+     It first *probes the SCCB polarity*: one R0x00 read at polarity 0, then
+     polarity 1 if that fails, and only then the table. The probe must never
+     write a register, so a wrong guess cannot disturb the sensor, and it must
+     not cost more than two transactions.
 
   4. dvp_capture.v + frame_stat.v turn one synthetic FRAME_VALID/LINE_VALID
      frame into exactly 376*240 = 90240 pixels with the right sum/min/max.
@@ -27,6 +31,11 @@ things that actually decide whether the board works the first time it is powered
      115200 baud (UART_BAUD_DIV clocks per bit).
 
   6. The top-level status line is exactly 44 bytes and hex-encodes the fields.
+
+  7. sccb_master.v really carries the SCL/SDA swap mux, and the status line's
+     self-test letter has three states: K (normal wiring) / W (crossed wiring,
+     auto-corrected) / F (neither polarity answers). The mapping from
+     {"ok","swapped"} to the letter is asserted from both sides.
 
 The register table and the fixed-character table are PARSED OUT OF THE RTL, not
 restated here, so the model cannot silently drift from the design.
@@ -42,6 +51,8 @@ ROOT = os.path.dirname(TOOLS)
 HDL = os.path.join(ROOT, "src", "vision_sub", "user_source", "hdl_source")
 DEFS = os.path.join(HDL, "vision_def.v")
 F_TOP = os.path.join(HDL, "top_vision_m1.v")
+F_MASTER = os.path.join(HDL, "sccb_master.v")
+F_CFG = os.path.join(HDL, "mt9v034_cfg.v")
 
 FAILURES = []
 CHECKS = [0]
@@ -122,6 +133,45 @@ def parse_fixed_char():
         tbl[int(idx)] = int(hexv, 16)
     tbl["default"] = None
     return tbl
+
+
+def parse_sccb_swap():
+    """Pin the SCL/SDA swap mux in sccb_master.v.
+
+    This mux is the entire point of the polarity fix: the module does not know
+    which physical wire reaches the CMOS SCL, so it must be able to swap the two
+    roles. If somebody deletes one leg of it, these regexes stop matching and
+    the model fails instead of the board quietly going back to "SCCB dead".
+    """
+    with open(F_MASTER, "r", encoding="utf-8") as fh:
+        code = strip_comments(fh.read())
+    pats = {
+        "swap_input": r"input\s+swap,",
+        "port_inout": r"inout\s+scl,",
+        "scl": r"assign\s+scl\s*=\s*swap\s*\?\s*sda_drv\s*:\s*scl_r\s*;",
+        "sda": r"assign\s+sda\s*=\s*swap\s*\?\s*scl_r\s*:\s*sda_drv\s*;",
+        "in":  r"assign\s+sda_in\s*=\s*swap\s*\?\s*scl\s*:\s*sda\s*;",
+    }
+    return {k: bool(re.search(v, code)) for k, v in pats.items()}
+
+
+def parse_cfg_probe():
+    """Pin the shape of the polarity probe in mt9v034_cfg.v.
+
+    Three separate facts, because each one can regress on its own:
+      probe_first -- the R0x00 read is issued before the first table write;
+      try_other   -- the sequencer can actually drive sccb_swap to 1;
+      lock        -- on success it latches the polarity it probed with.
+    """
+    with open(F_CFG, "r", encoding="utf-8") as fh:
+        code = strip_comments(fh.read())
+    m_probe = re.search(r"sccb_addr\s*<=\s*`MT_REG_VERSION", code)
+    m_table = re.search(r"sccb_addr\s*<=\s*cfg_addr_of\(wr_idx\)", code)
+    return {
+        "probe_first": bool(m_probe and m_table and m_probe.start() < m_table.start()),
+        "try_other": bool(re.search(r"sccb_swap\s*<=\s*1'b1", code)),
+        "lock": bool(re.search(r"sccb_swap\s*<=\s*trial", code)),
+    }
 
 
 # ============================================================
@@ -572,27 +622,130 @@ def test_cfg_table(env):
 
 
 def test_cfg_run(env):
-    print("\n-- 3b. config sequencer + version check (transaction level) --")
+    print("\n-- 3b. config sequencer: polarity probe + version check --")
     tbl = cfg_expected(env)
+    VER = env["MT_VER_EXPECT"]
 
-    def run(vread):
-        writes, err = [], 0
+    def run(bus):
+        """Transaction-level model of the new sequencer.
+
+        bus(polarity) -> the 16-bit value the sensor returns for an R0x00 read
+        performed with that SCL/SDA polarity.
+
+        Order of business (this is what the assertions below pin down):
+          1. probe polarity 0  -- a single R0x00 read, NO register writes;
+          2. probe polarity 1  -- same, only if step 1 did not answer;
+          3. lock the polarity that answered, then write the table in order;
+          4. read R0x00 again as an end-to-end check, retrying the table only.
+        """
+        log, err, probes = [], 0, 0
+        locked = None
+        for pol in (0, 1):
+            probes += 1
+            log.append(("R", env["MT_REG_VERSION"], pol))
+            if bus(pol) == VER:
+                locked = pol
+                break
+        if locked is None:
+            return log, False, 0, err, probes
+
         for _ in range(3):
-            writes += list(tbl)
-            if vread == env["MT_VER_EXPECT"]:
-                return writes, True, err
+            for a, v in tbl:
+                log.append(("W", a, v, locked))
+            log.append(("R", env["MT_REG_VERSION"], locked))
+            if bus(locked) == VER:
+                return log, True, locked, err, probes
             err += 1
-        return writes, False, err
+        return log, False, locked, err, probes
 
-    w, ok, _ = run(0x1324)
-    check(ok, "version 0x1324 -> cam_ok = 1")
-    check(w == tbl, "one clean pass through the table, in order")
+    # --- 1. normally wired bus: polarity 0 answers -------------------------
+    log, ok, sw, err, probes = run(lambda p: VER)
+    writes = [e for e in log if e[0] == "W"]
+    check(ok and sw == 0, "normally-wired bus answers on polarity 0 -> swap = 0")
+    check(probes == 1, "only ONE probe transaction is spent", "got %d" % probes)
+    check(log[0][0] == "R",
+          "the very first transaction is a read, not a write")
+    check([(e[1], e[2]) for e in writes] == tbl,
+          "then the whole table, in order, with the right values")
+    check(all(e[3] == 0 for e in writes), "all writes go out with swap = 0")
 
-    w, ok, err = run(0x1234)
-    check(not ok, "version mismatch -> cam_ok = 0")
-    check(len(w) == 3 * len(tbl), "mismatch retries the whole table 3 times",
-          "wrote %d entries" % len(w))
-    check(err == 3, "mismatch counted 3 failed readbacks", "err=%d" % err)
+    # --- 2. crossed wiring: only polarity 1 answers (the fix) -------------
+    log, ok, sw, err, probes = run(lambda p: VER if p == 1 else 0xFFFF)
+    writes = [e for e in log if e[0] == "W"]
+    check(ok and sw == 1,
+          "crossed wiring: polarity 1 answers -> swap = 1, auto-corrected")
+    check(probes == 2, "exactly two probes are spent", "got %d" % probes)
+    check(log[0] == ("R", env["MT_REG_VERSION"], 0) and
+          log[1] == ("R", env["MT_REG_VERSION"], 1),
+          "both probes are plain R0x00 reads, and they try 0 before 1")
+    check(len(writes) == len(tbl),
+          "the table runs exactly once, only after the probe locks")
+    check(all(e[3] == 1 for e in writes),
+          "and every write then goes out with swap = 1")
+    check(all(e[0] == "R" for e in log[:2]),
+          "control: the two probes are the first two transactions")
+
+    # --- 3. dead bus: nothing answers -> no register is ever written ------
+    log, ok, sw, err, probes = run(lambda p: 0xFFFF)
+    check(not ok, "dead bus (both polarities read 0xFFFF) -> cam_ok = 0")
+    check(probes == 2 and all(e[0] == "R" for e in log),
+          "two read probes and ZERO register writes when neither polarity "
+          "answers -- a wrong guess cannot disturb the sensor",
+          "log = %s" % (log,))
+
+    # --- 4. probe ok but the verify read fails: retry the table, not the probe
+    calls = [0]
+
+    def probe_ok_then_bad(p):
+        calls[0] += 1
+        return VER if calls[0] == 1 else 0x1234
+
+    log, ok, sw, err, probes = run(probe_ok_then_bad)
+    check(not ok and err == 3,
+          "probe ok but verify mismatch -> cam_ok = 0 after 3 tries",
+          "err = %d" % err)
+    check(probes == 1, "and the polarity is NOT probed again on verify retries")
+    check(len([e for e in log if e[0] == "W"]) == 3 * len(tbl),
+          "the table is rewritten 3 times")
+
+
+def test_sccb_swap_pins(env):
+    print("\n-- 3c. sccb_master.v swap mux + mt9v034_cfg.v probe shape --")
+    got = parse_sccb_swap()
+    check(got["swap_input"], "sccb_master has the `swap` input")
+    check(got["port_inout"], "scl is declared inout (it becomes SDA when swapped)")
+    check(got["scl"], "scl drives sda_drv when swap = 1, scl_r when swap = 0")
+    check(got["sda"], "sda drives scl_r when swap = 1, sda_drv when swap = 0")
+    check(got["in"], "sda_in samples scl when swap = 1, sda when swap = 0")
+    expect_fail(not all(got.values()),
+                "removing any one leg of the swap mux is detected")
+
+    probe = parse_cfg_probe()
+    check(probe["probe_first"],
+          "the R0x00 probe read is issued BEFORE any table write")
+    check(probe["try_other"], "the sequencer can flip sccb_swap to 1")
+    check(probe["lock"], "and locks the winning polarity from `trial`")
+
+    # Each top carries its own copy of the SCCB wiring and of the flag
+    # renderer, so "I changed the shared module but forgot one top" is a real
+    # failure mode -- exactly what the M4 auto_exp/frame_tick episode was.
+    # Check all five here, from the files, not from a list restated by hand.
+    tops = ["top_vision_m%d.v" % i for i in range(1, 6)]
+    missing = []
+    for t in tops:
+        with open(os.path.join(HDL, t), "r", encoding="utf-8") as fh:
+            code = strip_comments(fh.read())
+        ok = (re.search(r"inout\s+cam_scl,", code) and
+              re.search(r"\.swap\s*\(sccb_swap\)", code) and
+              re.search(r"\.sccb_swap\s*\(sccb_swap\)", code) and
+              re.search(r"prt_sw\s*<=\s*sccb_swap;", code) and
+              re.search(r"line_byte = prt_ok \? \(prt_sw \? 8'h57 : 8'h4B\)"
+                        r" : 8'h46;", code))
+        if not ok:
+            missing.append(t)
+    check(not missing,
+          "all five tops carry inout cam_scl + swap wiring + the K/W/F flag",
+          "incomplete in %s" % (missing,))
 
 
 # ============================================================
@@ -672,6 +825,14 @@ def hexc(n):
     return ord("0") + n if n < 10 else ord("A") + n - 10
 
 
+def flag_char(prt):
+    """Self-test letter: 'K' normal wiring, 'W' crossed wiring that the
+    polarity probe corrected, 'F' neither polarity answered 0x1324."""
+    if not prt["ok"]:
+        return ord("F")
+    return ord("W") if prt.get("sw") else ord("K")
+
+
 def line_bytes(prt, tbl):
     out = []
     for i in range(44):
@@ -689,7 +850,7 @@ def line_bytes(prt, tbl):
         elif 40 <= i <= 41:
             out.append(hexc((prt["max"] >> (4 * (1 - (i - 40)))) & 0xF))
         elif i == 4:
-            out.append(ord("K") if prt["ok"] else ord("F"))
+            out.append(flag_char(prt))
         else:
             out.append(ord(" "))
     return out
@@ -701,7 +862,7 @@ def test_line(env):
     check(tbl.get("default") is None, "fixed_char() default marks dynamic slots")
 
     prt = {"ver": 0x1324, "sum": 0x0123ABCD, "cnt": 90240,
-           "min": 0x00, "max": 0xFF, "ok": True}
+           "min": 0x00, "max": 0xFF, "ok": True, "sw": False}
     b = line_bytes(prt, tbl)
     text = bytes(b).decode("ascii")
     print("      line: %r  (%d bytes)" % (text, len(b)))
@@ -711,10 +872,23 @@ def test_line(env):
     check(90240 == env["CAM_FRAME_PIX"],
           "N field 90240 == CAM_FRAME_PIX (016080 hex)")
 
-    bad = dict(prt)
-    bad["ok"] = False
-    check(line_bytes(bad, tbl)[4] == ord("F"),
-          "self-test flag renders 'F' when cam_ok = 0")
+    # The self-test letter has three states, and the two that mean "it works"
+    # must be distinguishable -- otherwise a crossed harness looks identical to
+    # a correct one and nobody ever learns the wires are swapped.
+    got = {"K": dict(prt, ok=True, sw=False),
+           "W": dict(prt, ok=True, sw=True),
+           "F": dict(prt, ok=False, sw=False)}
+    for letter, state in got.items():
+        check(line_bytes(state, tbl)[4] == ord(letter),
+              "self-test letter is '%s' for ok=%s sw=%s"
+              % (letter, state["ok"], state["sw"]))
+
+    bad = dict(prt, ok=False)
+    expect_fail(line_bytes(bad, tbl)[4] == ord("K"),
+                "cam_ok = 0 never renders 'K'")
+    crossed = dict(prt, ok=True, sw=True)
+    expect_fail(bytes(line_bytes(crossed, tbl)) == bytes(b),
+                "a corrected-but-crossed harness does NOT look like a normal one")
 
     wrong = dict(prt)
     wrong["ver"] = 0x2413
@@ -735,6 +909,7 @@ def main():
     test_sccb(env)
     test_cfg_table(env)
     test_cfg_run(env)
+    test_sccb_swap_pins(env)
     test_dvp(env)
     test_uart(env)
     test_line(env)

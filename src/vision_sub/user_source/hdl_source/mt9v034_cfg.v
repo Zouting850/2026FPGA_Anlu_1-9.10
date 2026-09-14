@@ -8,8 +8,29 @@
 // 时序：请求 → 等 sccb_busy 拉高（已被接受）→ 撤请求 → 等 ack
 //       → 保持写间隔 → 下一条
 //
-// 流程：上电等待 → 逐条写配置表 → 稳定等待 → 读 R0x00 校验
-//       → 版本 = 0x1324 → cam_ok=1；否则整表重试，最多 3 次
+// 流程：上电等待
+//       → 【极性探测】用极性 0 单次读 R0x00；不是 0x1324 就换极性 1 再读一次
+//       → 探测成功才继续：逐条写配置表 → 稳定等待 → 再读 R0x00 校验
+//       → 版本 = 0x1324 → cam_ok=1；否则重写配置表，最多 3 次
+//       → 探测两次都失败 → cam_ok=0（线路/上拉/供电问题，不是接反）
+//
+// 【为什么要先探测极性】
+//   改造后的总钻风把 CMOS 的 SCCB 两线引到 FFC 的 TXD/RXD，转接板 V3.1 又原样
+//   透传到 P1-5/P1-7。逐飞的手册只说"CMOS 的 IIC 引脚将直接与 FFC 连通"，
+//   **没有说明哪一根是 SCL**。实物上这是个 50/50 的赌注，接反的现象极有迷惑性：
+//     总线毫无应答 → 读版本号得到 FFFF → 上电默认(752x480, AEC 开)原样保留
+//     → 而 DVP 的 11 根线照常工作，串口上看起来"图像数据在动、只有两项不变"。
+//   与其让用户去赌/去改线，不如让 FPGA 自己试出来：两种极性各读一次 R0x00，
+//   谁回 0x1324 就用谁，并把结果输出到 sccb_swap 锁定、由状态行报告。
+//
+//   探测刻意做成"只发一次读事务"（约 0.6 ms），而不是跑整表：
+//     * 接反时时钟会打到 CMOS 的 SDA 上，虽然 CMOS 的 SDA 是开漏、多半不会被
+//       我们驱高而打架，但仍然越短越安全；
+//     * 失败的那一次不写任何寄存器，不会把传感器改坏。
+//
+// 【为什么写完还要再读一次校验】
+//   探测已经证明了总线通，但"总线通"不等于"每条写都落到了"。写完再读一次
+//   R0x00 作为端到端校验；不匹配就整表重写（最多 3 次），仍失败则 cam_ok=0。
 //
 // 说明：M1 阶段保留传感器的 AEC/AGC 自动曝光，先拿到可用图像；
 //       M4 再把 R0xAF 写 0x0000 关闭 AEC/AGC，改由 FPGA 闭环回写
@@ -21,7 +42,7 @@ module mt9v034_cfg
 (
 	input                       clk,
 	input                       rst,        // 高有效
-	input                       restart,    // 拉高一拍重新配置
+	input                       restart,    // 拉高一拍重新配置（含重新探测极性）
 	// ---- 接 sccb_master ----
 	output reg                  sccb_req,
 	output reg                  sccb_rw,
@@ -30,6 +51,7 @@ module mt9v034_cfg
 	input                       sccb_busy,
 	input                       sccb_ack,
 	input[15:0]                 sccb_rdata,
+	output reg                  sccb_swap,  // 探测出的两线极性，直接接 sccb_master.swap
 	// ---- 状态 ----
 	output reg                  cfg_busy,
 	output reg                  cfg_done,
@@ -39,21 +61,27 @@ module mt9v034_cfg
 	output reg[3:0]             err_cnt     // 版本校验失败次数
 );
 
-localparam C_PWRWAIT = 4'd0;
-localparam C_WRSETUP = 4'd1;
-localparam C_WRBUSY  = 4'd2;
-localparam C_WRACK   = 4'd3;
-localparam C_WRGAP   = 4'd4;
-localparam C_SETTLE  = 4'd5;
-localparam C_RDSETUP = 4'd6;
-localparam C_RDBUSY  = 4'd7;
-localparam C_RDACK   = 4'd8;
-localparam C_CHECK   = 4'd9;
-localparam C_DONE    = 4'd10;
+localparam C_PWRWAIT = 5'd0;
+localparam C_PR_GAP  = 5'd1;    // 两次极性探测之间的静默
+localparam C_PR_SETUP= 5'd2;    // 探测：发起读 R0x00
+localparam C_PR_BUSY = 5'd3;
+localparam C_PR_ACK  = 5'd4;
+localparam C_PR_CHK  = 5'd5;
+localparam C_WRSETUP = 5'd6;
+localparam C_WRBUSY  = 5'd7;
+localparam C_WRACK   = 5'd8;
+localparam C_WRGAP   = 5'd9;
+localparam C_SETTLE  = 5'd10;
+localparam C_RDSETUP = 5'd11;
+localparam C_RDBUSY  = 5'd12;
+localparam C_RDACK   = 5'd13;
+localparam C_CHECK   = 5'd14;
+localparam C_DONE    = 5'd15;
 
-reg[3:0]  st;
+reg[4:0]  st;
 reg[31:0] wait_cnt;
 reg[3:0]  retry_cnt;
+reg       trial;        // 正在试探的极性：0 = 先试"正常接法"，1 = 再试"接反"
 
 // ------------------------------------------------------------
 // 配置表：序号 → 寄存器地址 / 写入值
@@ -99,10 +127,12 @@ begin
 		st         <= C_PWRWAIT;
 		wait_cnt   <= 32'd0;
 		retry_cnt  <= 4'd0;
+		trial      <= 1'b0;
 		sccb_req   <= 1'b0;
 		sccb_rw    <= 1'b0;
 		sccb_addr  <= 16'd0;
 		sccb_wdata <= 16'd0;
+		sccb_swap  <= 1'b0;
 		cfg_busy   <= 1'b1;
 		cfg_done   <= 1'b0;
 		cam_ok     <= 1'b0;
@@ -115,6 +145,7 @@ begin
 		case(st)
 			// ------------------------------------------------
 			// 上电/复位后等传感器内部稳定
+			// 探测从"极性 0 = 正常接法"开始
 			// ------------------------------------------------
 			C_PWRWAIT:
 			begin
@@ -123,12 +154,82 @@ begin
 				cam_ok   <= 1'b0;
 				if(wait_cnt == (`RESET_WAIT_CNT - 32'd1))
 				begin
-					wait_cnt <= 32'd0;
-					wr_idx   <= 4'd0;
-					st       <= C_WRSETUP;
+					wait_cnt  <= 32'd0;
+					wr_idx    <= 4'd0;
+					trial     <= 1'b0;
+					sccb_swap <= 1'b0;      // 先按"正常接法"探测
+					st        <= C_PR_SETUP;
 				end
 				else
 					wait_cnt <= wait_cnt + 32'd1;
+			end
+
+			// ------------------------------------------------
+			// 两次极性探测之间的静默（让总线彻底回到空闲）
+			// ------------------------------------------------
+			C_PR_GAP:
+				if(wait_cnt == (`PROBE_GAP_CNT - 32'd1))
+				begin
+					wait_cnt <= 32'd0;
+					st       <= C_PR_SETUP;
+				end
+				else
+					wait_cnt <= wait_cnt + 32'd1;
+
+			// ------------------------------------------------
+			// 极性探测：只发一条"读 R0x00"
+			// ------------------------------------------------
+			C_PR_SETUP:
+			begin
+				sccb_addr  <= `MT_REG_VERSION;
+				sccb_wdata <= 16'd0;
+				sccb_rw    <= 1'b1;
+				sccb_req   <= 1'b1;
+				st         <= C_PR_BUSY;
+			end
+
+			C_PR_BUSY:
+			if(sccb_busy == 1'b1)
+			begin
+				sccb_req <= 1'b0;
+				st       <= C_PR_ACK;
+			end
+
+			C_PR_ACK:
+			if(sccb_ack == 1'b1)
+			begin
+				ver_rd <= sccb_rdata;
+				st     <= C_PR_CHK;
+			end
+
+			C_PR_CHK:
+			begin
+				if(ver_rd == `MT_VER_EXPECT)
+				begin
+					// 这一种极性通了 → 锁定（sccb_swap 保持 trial 的值），开始写配置表
+					sccb_swap <= trial;
+					cfg_busy  <= 1'b1;
+					wr_idx    <= 4'd0;
+					wait_cnt  <= 32'd0;
+					st        <= C_WRSETUP;
+				end
+				else if(trial == 1'b0)
+				begin
+					// 正常接法不通 → 换极性 1（实物两线接反时走这条路）
+					trial     <= 1'b1;
+					sccb_swap <= 1'b1;
+					wait_cnt  <= 32'd0;
+					st        <= C_PR_GAP;
+				end
+				else
+				begin
+					// 两种极性都读不到 0x1324
+					// → 不是接反，去查线路/上拉/供电（状态行会打出 F 和 V=FFFF）
+					cam_ok   <= 1'b0;
+					cfg_busy <= 1'b0;
+					cfg_done <= 1'b1;
+					st       <= C_DONE;
+				end
 			end
 
 			// ------------------------------------------------
@@ -192,7 +293,7 @@ begin
 					wait_cnt <= wait_cnt + 32'd1;
 
 			// ------------------------------------------------
-			// 读 R0x00 校验版本
+			// 读完再校验一次（端到端）
 			// ------------------------------------------------
 			C_RDSETUP:
 			begin
@@ -219,6 +320,7 @@ begin
 
 			// ------------------------------------------------
 			// 校验 / 重试
+			// 极性已被探测证明，所以重试只重写配置表，不再重新探测
 			// ------------------------------------------------
 			C_CHECK:
 			begin
@@ -246,7 +348,7 @@ begin
 						retry_cnt <= retry_cnt + 4'd1;
 						wr_idx    <= 4'd0;
 						wait_cnt  <= 32'd0;
-						st        <= C_PWRWAIT;
+						st        <= C_WRSETUP;
 					end
 				end
 			end
@@ -263,6 +365,7 @@ begin
 					retry_cnt <= 4'd0;
 					wr_idx    <= 4'd0;
 					wait_cnt  <= 32'd0;
+					// 重新走一遍极性探测：允许用户换过线之后不改 bit 直接复位重试
 					st        <= C_PWRWAIT;
 				end
 			end

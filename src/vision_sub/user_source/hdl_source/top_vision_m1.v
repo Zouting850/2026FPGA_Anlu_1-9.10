@@ -35,7 +35,7 @@ module top_vision_m1
 	input                       cam_href,    // L14
 	input                       cam_vsync,   // M14
 	input[7:0]                  cam_d,       // [0..7] = G11 G12 F13 H13 H14 J14 J13 K12
-	output                      cam_scl,     // P11
+	inout                       cam_scl,     // P11（可能是 SCL，也可能是 SDA，见 pin.adc）
 	inout                       cam_sda,     // L10
 	// ---- 调试串口（板载 CH340）----
 	output                      uart_tx,     // D12
@@ -86,6 +86,7 @@ wire        sccb_busy;
 wire        sccb_ack;
 wire[15:0]  sccb_rdata;
 wire[4:0]   sccb_nack;
+wire        sccb_swap;      // 由 u_cfg 探测出的两线极性，直接喂给 u_sccb.swap
 wire        cfg_busy;
 wire        cfg_done;
 wire        cam_ok;
@@ -105,6 +106,7 @@ mt9v034_cfg u_cfg
 	.sccb_busy  (sccb_busy),
 	.sccb_ack   (sccb_ack),
 	.sccb_rdata (sccb_rdata),
+	.sccb_swap  (sccb_swap),
 	.cfg_busy   (cfg_busy),
 	.cfg_done   (cfg_done),
 	.cam_ok     (cam_ok),
@@ -125,6 +127,7 @@ sccb_master u_sccb
 	.ack      (sccb_ack),
 	.rd_data  (sccb_rdata),
 	.nack_cnt (sccb_nack),
+	.swap     (sccb_swap),
 	.scl      (cam_scl),
 	.sda      (cam_sda)
 );
@@ -233,6 +236,7 @@ reg[23:0] prt_cnt;
 reg[7:0]  prt_min;
 reg[7:0]  prt_max;
 reg       prt_ok;
+reg       prt_sw;      // 上报用：自检通过时两线是否被判定为接反（'W'）
 
 // ------------------------------------------------------------
 // 行字节生成
@@ -315,7 +319,9 @@ function[7:0] line_byte;
 			line_byte = hexc(vtmp[nb*4 +: 4]);
 		end
 		else if(i == 6'd4)                                       // 自检标志
-			line_byte = prt_ok ? 8'h4B : 8'h46;                  // 'K' / 'F'
+			// 'K' = 通且两线是正常接法；'W' = 通但两线接反、已自动换向；
+			// 'F' = 两种极性都读不到 0x1324（去查线路/上拉/供电）
+			line_byte = prt_ok ? (prt_sw ? 8'h57 : 8'h4B) : 8'h46;
 		else
 			line_byte = 8'h20;
 	end
@@ -416,6 +422,7 @@ begin
 		prt_min <= 8'h00;
 		prt_max <= 8'h00;
 		prt_ok  <= 1'b0;
+		prt_sw  <= 1'b0;
 	end
 	else
 	begin
@@ -431,6 +438,7 @@ begin
 					prt_min <= snap_min;
 					prt_max <= snap_max;
 					prt_ok  <= cam_ok;
+					prt_sw  <= sccb_swap;
 					xpos    <= 6'd0;
 					xst     <= X_SEND;
 				end

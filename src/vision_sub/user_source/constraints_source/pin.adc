@@ -15,8 +15,9 @@
 #      src/user_source/constraints_source/ 下，两者互不影响。
 #   2) 摄像头 3V3 由副板独立 LDO 供给，不占用扩展口的 VCC5V/3.3V 脚，
 #      因此这里没有任何电源相关配置。
-#   3) SCCB 的 SCL 由 FPGA 单向驱动（push-pull），SDA 为双向三态；
-#      若实物已在转接板上装了 4.7k 上拉，SDA 的 PULLTYPE 改成 NONE 即可。
+#   3) SCCB 两条线都做成 inout：正常接法下 P11 承载 SCL（push-pull）、L10 承载
+#      SDA（开漏）；若实物两线接反，顶层会自动交换角色，所以两个脚都必须有上拉。
+#      （详细背景见下方 SCCB 段与 sccb_master.v 的"管脚角色"注释。）
 #   4) J1 第一脚在正方向"左上"，J2 第一脚在正方向"右下"，插接前务必核对。
 # ============================================================
 
@@ -39,8 +40,14 @@ set_pin_assignment	{ rst_n }	{ LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = 
 #   cam_d[7]  J1-9  GPIOA_8  K12
 #   cam_href  J1-10 GPIOA_9  L14
 #   cam_vsync J1-13 GPIOA_10 M14
-#   cam_scl   J1-14 GPIOA_11 P11   (改造后：转接板 P1-5 TXD→SCL)
-#   cam_sda   J1-15 GPIOA_12 L10   (改造后：转接板 P1-7 RXD→SDA)
+#   cam_scl   J1-14 GPIOA_11 P11   ← 转接板 V3.1 的 P1-5（丝印 TXD）
+#   cam_sda   J1-15 GPIOA_12 L10   ← 转接板 V3.1 的 P1-7（丝印 RXD）
+#
+# 注意：转接板原理图（摄像头转接板 V3.1，2025/6/16）透传的是 J1(FFC05-18) 的
+#   3=TXD / 4=RXD，对应 P1-5(TXD) / P1-7(RXD)。逐飞手册只说"改造后 CMOS 的 IIC
+#   引脚直接与 FFC 连通"，**并未说明 TXD 与 RXD 哪个是 SCL**。所以这里不再假设
+#   "TXD=SCL"，改由 mt9v034_cfg 上电探测（两种极性各读一次 R0x00）后锁定；
+#   状态行的自检字母用 K（正常）/ W（接反、已自动换向）/ F（都不通）。
 # ------------------------------------------------------------
 set_pin_assignment	{ cam_pclk }	{ LOCATION = D14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ cam_d[0] }	{ LOCATION = G11; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
@@ -54,8 +61,14 @@ set_pin_assignment	{ cam_d[7] }	{ LOCATION = K12; IOSTANDARD = LVCMOS33; PULLTYP
 set_pin_assignment	{ cam_href }	{ LOCATION = L14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ cam_vsync }	{ LOCATION = M14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 
-# SCCB：SCL 单向输出；SDA 双向（输入读版本、输出写配置）
-set_pin_assignment	{ cam_scl }	{ LOCATION = P11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+# SCCB：两条线都要能当"开漏数据线"用，所以两个脚都给上拉。
+#   改造后的总钻风把 CMOS 的 SCCB 引到 FFC 的 TXD/RXD，转接板 V3.1 原样透传到
+#   P1-5/P1-7。逐飞的手册**没有说明哪一根是 SCL**，所以实物上存在接反的可能；
+#   顶层把这两个脚都做成 inout，由 mt9v034_cfg 探测出极性后锁定（见 sccb_master.v）。
+#   承载时钟的那一侧由 FPGA push-pull 驱动，上拉只起兜底作用；
+#   承载数据的那一侧靠上拉（FPGA 内部弱上拉，100kHz 下够用；若实测上升沿偏慢，
+#   可在转接板侧补一颗 4.7k 到 3V3）。
+set_pin_assignment	{ cam_scl }	{ LOCATION = P11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = PULLUP; }
 set_pin_assignment	{ cam_sda }	{ LOCATION = L10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = PULLUP; }
 
 # ------------------------------------------------------------
