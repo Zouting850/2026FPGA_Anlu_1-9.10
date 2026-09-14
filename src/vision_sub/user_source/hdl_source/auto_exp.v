@@ -125,8 +125,24 @@ wire too_dark   = geom_ok && (frm_sum <  (`EXP_TARGET_SUM - `EXP_DEADBAND_SUM));
 wire in_band    = geom_ok && (~too_bright) && (~too_dark);
 wire div_ok     = (div_cnt >= `EXP_UPDATE_DIV);
 
-// 均值显示用：sum / 90240（除数是常量，TD 会综合成"乘倒数 + 移位"）
-wire[31:0] mean_c = frm_sum / `CAM_FRAME_PIX;
+// 均值显示用：sum / 90240。
+//
+// 【为什么这里必须写成"乘倒数 + 右移"，不能写除法】
+//   原写法 `frm_sum / CAM_FRAME_PIX` 看着无害（除数是常量），但 TD **不会**
+//   自动把它变成"乘倒数 + 移位"——它用纯组合逻辑搭了一个 32 级恢复余数除法器。
+//   真实综合实测（M5，2026-09-14）：
+//     Data Path Delay 50.564ns, Logic Level 48 (ADDER=32, LUT2=16)
+//     slack -30.680ns（sys_clk 50MHz/20ns 域，10 条违例里占 8 条）
+//   即这一行显示用的除法，直接把整个 sys_clk 域的时序打穿了。
+//
+//   改成 186 / 2^24 = 1.108665e-5 ≈ 1/90240（偏差 +0.046%）：
+//     * frm_sum 有硬上界：90240 x 255 = 23,011,200（25 位）。乘 186 后最大
+//       4,280,083,200 < 2^32，**32 位中间积不可能溢出**（无需更宽的中间量）；
+//     * 再右移 24 位，最大 255.13 -> 255，正好落在 8 位无符号范围内；
+//     * 186 = 128+32+16+8+2，全用移位相加；综合后逻辑级数从 48 降到个位数级。
+//   这是 display-only 字段（只喂状态行的 Y=），0.046% 偏差无任何影响。
+wire[31:0] mean_m = frm_sum * 32'd186;
+wire[7:0]  mean_c = mean_m[31:24];
 
 always@(posedge clk or posedge rst)
 begin

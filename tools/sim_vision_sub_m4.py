@@ -49,6 +49,7 @@ ROOT = os.path.dirname(TOOLS)
 HDL = os.path.join(ROOT, "src", "vision_sub", "user_source", "hdl_source")
 DEFS = os.path.join(HDL, "vision_def.v")
 F_TOP = os.path.join(HDL, "top_vision_m4.v")
+F_AEXP = os.path.join(HDL, "auto_exp.v")
 
 FAILURES = []
 CHECKS = [0]
@@ -129,8 +130,28 @@ def parse_fixed_char(path=F_TOP):
     return tbl
 
 
+def parse_mean_recip(path=F_AEXP):
+    """Parse the display-mean reciprocal out of auto_exp.v.
+
+    The RTL computes the 8-bit display mean as ``(frm_sum * M) >> SH`` rather
+    than ``frm_sum / CAM_FRAME_PIX``.  That is not cosmetic: TD does *not*
+    turn a division by a constant into a multiply-by-reciprocal, it builds a
+    32-step combinational restoring divider -- measured at logic level 48 /
+    50.564 ns, which single-handedly broke the whole 50 MHz sys_clk domain
+    (slack -30.680 ns).  Parsing M and SH here means the model cannot silently
+    drift from whatever the RTL actually does.
+    """
+    code = strip_comments(open(path, "r", encoding="utf-8").read())
+    m = re.search(r"frm_sum\s*\*\s*\d+'d(\d+)", code)
+    s = re.search(r"mean_m\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]", code)
+    if not m or not s:
+        raise RuntimeError("display-mean reciprocal not found in %s" % path)
+    return int(m.group(1)), int(s.group(2))
+
+
 D = parse_defines()
 TBL = parse_fixed_char()
+MEAN_MUL, MEAN_SHIFT = parse_mean_recip()
 
 PIX = D["CAM_FRAME_PIX"]
 T_SUM = D["EXP_TARGET_SUM"]
@@ -281,8 +302,9 @@ class AutoExpFrame(object):
         in_band = (geom_ok and not (frm_sum > T_SUM + BAND or sat_alarm)
                    and not (frm_sum < T_SUM - BAND))
 
-        # mean display: sum / 90240, only meaningful with valid geometry
-        self.mean = (frm_sum // PIX) if geom_ok else 0
+        # mean display: (sum * M) >> SH ≈ sum / 90240, only meaningful with
+        # valid geometry (see parse_mean_recip for why this is not a divide)
+        self.mean = (((frm_sum * MEAN_MUL) >> MEAN_SHIFT) & 0xFF) if geom_ok else 0
 
         # lock judgment
         if in_band:
@@ -398,6 +420,46 @@ def test_constants():
           "line length 164 == 68 header bytes + 94 curve chars + CRLF")
     check(REG_SHUT == 0x0B and REG_GAIN == 0x35 and REG_AEC == 0xAF,
           "register addresses are R0x0B / R0x35 / R0xAF")
+
+
+# ============================================================
+# 1b. display-mean reciprocal (real TD timing bug, fixed)
+# ============================================================
+def test_mean_reciprocal():
+    print("-- 1b. display mean uses a reciprocal multiply, not a divider --")
+    M, SH = MEAN_MUL, MEAN_SHIFT
+    max_sum = PIX * 255                      # hard upper bound of frm_sum
+
+    exact = 1.0 / PIX
+    approx = M / float(1 << SH)
+
+    # This is a *proof* over the whole input range, not a spot check:
+    #   |approx*sum - exact*sum| <= |approx - exact| * max_sum  for all sum.
+    bound = abs(approx - exact) * max_sum
+    check(bound < 1.0,
+          "M/2^SH stays within 1 LSB of sum/90240 across the entire range",
+          "M=%d SH=%d -> bound %.4f LSB" % (M, SH, bound))
+
+    check(max_sum * M < (1 << 32),
+          "the 32-bit intermediate product cannot overflow "
+          "(max_sum x %d = %d < 2^32)" % (M, max_sum * M))
+
+    check(((max_sum * M) >> SH) <= 255,
+          "display mean never wraps the 8-bit field at full brightness "
+          "(max -> %d)" % ((max_sum * M) >> SH))
+
+    check(M * (1 << SH) > 0 and SH > 0 and M > 1,
+          "the reciprocal is an actual multiply-shift (M>1, SH>0)")
+
+    # Negative control: the nearest power of two is 2^16, and 1/65536 is 37.7%
+    # away from 1/90240 -- i.e. a bare right shift CANNOT do this job, which is
+    # exactly why the multiply is required.
+    best_pow2 = 1 << (PIX.bit_length() - 1)
+    pow2_err = abs(1.0 / best_pow2 - exact) * max_sum
+    expect_fail(pow2_err < 1.0,
+                "control bites: no pure right shift can replace the division",
+                "best 2^%d is off by %.0f LSB at full brightness"
+                % (PIX.bit_length() - 1, pow2_err))
 
 
 # ============================================================
@@ -697,6 +759,7 @@ def main():
     print("vision sub-board M4 model -- auto exposure closed loop")
     print("=" * 72)
     test_constants()
+    test_mean_reciprocal()
     test_meter()
     test_control_law()
     test_handshake()
