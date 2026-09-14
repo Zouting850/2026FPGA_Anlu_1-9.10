@@ -30,7 +30,7 @@ things that actually decide whether the board works the first time it is powered
   5. dbg_uart.v frames a byte as 1 start (0) + 8 data LSB-first + 1 stop (1) at
      115200 baud (UART_BAUD_DIV clocks per bit).
 
-  6. The top-level status line is exactly 44 bytes and hex-encodes the fields.
+  6. The top-level status line is exactly 52 bytes and hex-encodes the fields.
 
   7. sccb_master.v really carries the SCL/SDA swap mux, and the status line's
      self-test letter has three states: K (normal wiring) / W (crossed wiring,
@@ -155,6 +155,36 @@ def parse_sccb_swap():
     return {k: bool(re.search(v, code)) for k, v in pats.items()}
 
 
+def _case_item(code, start_label, end_label):
+    """Text of one `case` item, delimited by two unique state labels.
+
+    Anchoring on the labels (rather than on a regex over the whole file) matters:
+    a loose pattern silently swallowed the reset block, so a removed reset went
+    unnoticed. Labels are unique and stable, so this is exact.
+    """
+    m = re.search(re.escape(start_label) + r"(.*?)" + re.escape(end_label), code, re.S)
+    return m.group(1) if m else None
+
+
+def _retry_rearms(code):
+    """Both "probe failed" exits must reset wait_cnt.
+
+    There are two of them -- polarity probe failure (in C_PR_CHK) and table
+    verify exhausted (in C_CHECK). Miss either and the auto-retry countdown
+    starts from a stale value, so the retry fires immediately instead of after
+    PROBE_RETRY_CNT.
+    """
+    probe_fail = _case_item(code, "C_PR_CHK:", "C_WRSETUP:")
+    verify_out = _case_item(code, "C_CHECK:", "C_DONE:")
+    if probe_fail is None or verify_out is None:
+        return False
+    # Both items contain OTHER wait_cnt writes (the success path reloads it for
+    # the next gap), so "the item mentions wait_cnt" is not enough -- the reset
+    # has to sit immediately before the trip into C_DONE.
+    pat = r"wait_cnt\s*<=\s*32'd0;\s*st\s*<=\s*C_DONE;"
+    return bool(re.search(pat, probe_fail)) and bool(re.search(pat, verify_out))
+
+
 def parse_cfg_probe():
     """Pin the shape of the polarity probe in mt9v034_cfg.v.
 
@@ -171,6 +201,19 @@ def parse_cfg_probe():
         "probe_first": bool(m_probe and m_table and m_probe.start() < m_table.start()),
         "try_other": bool(re.search(r"sccb_swap\s*<=\s*1'b1", code)),
         "lock": bool(re.search(r"sccb_swap\s*<=\s*trial", code)),
+        # Diagnostic path: the FIRST (polarity 0) probe read is kept separately so
+        # the status line can expose both lines' idle levels at once.
+        "ver0": bool(re.search(r"if\(trial == 1'b0\)\s*ver_rd0\s*<=\s*sccb_rdata;", code)),
+        # Auto-retry: a failed probe re-runs itself instead of waiting for a
+        # power cycle. The guard is deliberately a *chain* -- merely mentioning
+        # the constant somewhere is not enough (that version passed even with
+        # the whole branch shorted out to `else if(1'b0)`).
+        "retry_defined": bool(re.search(
+            r"else if\(cam_ok == 1'b0\).*?PROBE_RETRY_CNT - 32'd1\).*?st\s*<=\s*C_PWRWAIT;",
+            code, re.S)),
+        # Every "probe failed -> C_DONE" transition must re-arm the retry delay,
+        # otherwise the countdown starts from a stale value and fires at once.
+        "retry_rearms": _retry_rearms(code),
     }
 
 
@@ -576,6 +619,14 @@ def test_sccb(env):
 # ============================================================
 # config table
 # ============================================================
+def read_first(reads):
+    return reads[0]
+
+
+def read_last(reads):
+    return reads[-1]
+
+
 def cfg_expected(env):
     addr_dev = {0: "MT_REG_RESET", 1: "MT_REG_CHIPCTRL", 2: "MT_REG_COLSTART",
                 3: "MT_REG_ROWSTART", 4: "MT_REG_WINHEIGHT",
@@ -638,28 +689,30 @@ def test_cfg_run(env):
           3. lock the polarity that answered, then write the table in order;
           4. read R0x00 again as an end-to-end check, retrying the table only.
         """
-        log, err, probes = [], 0, 0
+        log, err, probes, reads = [], 0, 0, []
         locked = None
         for pol in (0, 1):
             probes += 1
             log.append(("R", env["MT_REG_VERSION"], pol))
-            if bus(pol) == VER:
+            reads.append(bus(pol))
+            if reads[-1] == VER:
                 locked = pol
                 break
         if locked is None:
-            return log, False, 0, err, probes
+            return log, False, 0, err, probes, reads
 
         for _ in range(3):
             for a, v in tbl:
                 log.append(("W", a, v, locked))
             log.append(("R", env["MT_REG_VERSION"], locked))
-            if bus(locked) == VER:
-                return log, True, locked, err, probes
+            reads.append(bus(locked))
+            if reads[-1] == VER:
+                return log, True, locked, err, probes, reads
             err += 1
-        return log, False, locked, err, probes
+        return log, False, locked, err, probes, reads
 
     # --- 1. normally wired bus: polarity 0 answers -------------------------
-    log, ok, sw, err, probes = run(lambda p: VER)
+    log, ok, sw, err, probes, reads = run(lambda p: VER)
     writes = [e for e in log if e[0] == "W"]
     check(ok and sw == 0, "normally-wired bus answers on polarity 0 -> swap = 0")
     check(probes == 1, "only ONE probe transaction is spent", "got %d" % probes)
@@ -670,7 +723,7 @@ def test_cfg_run(env):
     check(all(e[3] == 0 for e in writes), "all writes go out with swap = 0")
 
     # --- 2. crossed wiring: only polarity 1 answers (the fix) -------------
-    log, ok, sw, err, probes = run(lambda p: VER if p == 1 else 0xFFFF)
+    log, ok, sw, err, probes, reads = run(lambda p: VER if p == 1 else 0xFFFF)
     writes = [e for e in log if e[0] == "W"]
     check(ok and sw == 1,
           "crossed wiring: polarity 1 answers -> swap = 1, auto-corrected")
@@ -686,7 +739,7 @@ def test_cfg_run(env):
           "control: the two probes are the first two transactions")
 
     # --- 3. dead bus: nothing answers -> no register is ever written ------
-    log, ok, sw, err, probes = run(lambda p: 0xFFFF)
+    log, ok, sw, err, probes, reads = run(lambda p: 0xFFFF)
     check(not ok, "dead bus (both polarities read 0xFFFF) -> cam_ok = 0")
     check(probes == 2 and all(e[0] == "R" for e in log),
           "two read probes and ZERO register writes when neither polarity "
@@ -700,13 +753,34 @@ def test_cfg_run(env):
         calls[0] += 1
         return VER if calls[0] == 1 else 0x1234
 
-    log, ok, sw, err, probes = run(probe_ok_then_bad)
+    log, ok, sw, err, probes, reads = run(probe_ok_then_bad)
     check(not ok and err == 3,
           "probe ok but verify mismatch -> cam_ok = 0 after 3 tries",
           "err = %d" % err)
     check(probes == 1, "and the polarity is NOT probed again on verify retries")
     check(len([e for e in log if e[0] == "W"]) == 3 * len(tbl),
           "the table is rewritten 3 times")
+
+    # --- 5. THE BOARD (2026-09-14 measurement): one line idle-high, the other
+    #        held LOW. Exactly this showed up as "V=0000 ... P0=FFFF" on the
+    #        serial port, so pin the whole chain here: sequencer readings ->
+    #        rendered line. If the diagnostic field is dropped, this fails. ----
+    log, ok, sw, err, probes, reads = run(lambda p: 0xFFFF if p == 0 else 0x0000)
+    check(not ok and probes == 2,
+          "asymmetric bus (FFFF / 0000) -> cam_ok = 0 after both polarities")
+    check(reads[0] == 0xFFFF, "polarity-0 probe reads all ones", "got 0x%04X" % reads[0])
+    check(reads[-1] == 0x0000, "polarity-1 probe reads all zeros",
+          "got 0x%04X" % reads[-1])
+    check(all(e[0] == "R" for e in log),
+          "and still ZERO register writes -- a failed probe never disturbs the sensor")
+    check(read_first(reads) == 0xFFFF and read_last(reads) == 0x0000,
+          "P0 must report the FIRST read, V the LAST one")
+
+    diag = {"ver": reads[-1], "ver0": reads[0], "sum": 0, "cnt": 0,
+            "min": 0, "max": 0, "ok": False, "sw": False}
+    dl = bytes(line_bytes(diag, parse_fixed_char())).decode("ascii")
+    check("V=0000" in dl and "P0=FFFF" in dl,
+          "the status line exposes BOTH lines' idle levels at once", "got %r" % dl)
 
 
 def test_sccb_swap_pins(env):
@@ -725,6 +799,12 @@ def test_sccb_swap_pins(env):
           "the R0x00 probe read is issued BEFORE any table write")
     check(probe["try_other"], "the sequencer can flip sccb_swap to 1")
     check(probe["lock"], "and locks the winning polarity from `trial`")
+    check(probe["ver0"],
+          "the polarity-0 read is latched separately for on-board diagnosis")
+    check(probe["retry_defined"],
+          "a failed probe auto-retries (PROBE_RETRY_CNT drives C_DONE -> C_PWRWAIT)")
+    check(probe["retry_rearms"],
+          "every cam_ok=0 -> C_DONE transition re-arms the retry delay")
 
     # Each top carries its own copy of the SCCB wiring and of the flag
     # renderer, so "I changed the shared module but forgot one top" is a real
@@ -813,9 +893,9 @@ def test_uart(env):
               "0x%02X: 8 data bits LSB-first" % byte)
         check(per == div, "0x%02X: %d clocks per bit" % (byte, div))
 
-    ms = 44 * 10 / baud * 1e3
+    ms = 52 * 10 / baud * 1e3
     check(ms < 6.0,
-          "a 44-byte status line takes %.1f ms (< one 60 Hz frame)" % ms)
+          "a 52-byte status line takes %.1f ms (< one 60 Hz frame)" % ms)
 
 
 # ============================================================
@@ -835,7 +915,7 @@ def flag_char(prt):
 
 def line_bytes(prt, tbl):
     out = []
-    for i in range(44):
+    for i in range(52):
         c = tbl.get(i, tbl.get("default"))
         if c is not None:
             out.append(c)
@@ -849,6 +929,8 @@ def line_bytes(prt, tbl):
             out.append(hexc((prt["min"] >> (4 * (1 - (i - 35)))) & 0xF))
         elif 40 <= i <= 41:
             out.append(hexc((prt["max"] >> (4 * (1 - (i - 40)))) & 0xF))
+        elif 46 <= i <= 49:
+            out.append(hexc((prt["ver0"] >> (4 * (3 - (i - 46)))) & 0xF))
         elif i == 4:
             out.append(flag_char(prt))
         else:
@@ -861,13 +943,13 @@ def test_line(env):
     tbl = parse_fixed_char()
     check(tbl.get("default") is None, "fixed_char() default marks dynamic slots")
 
-    prt = {"ver": 0x1324, "sum": 0x0123ABCD, "cnt": 90240,
+    prt = {"ver": 0x1324, "ver0": 0x1324, "sum": 0x0123ABCD, "cnt": 90240,
            "min": 0x00, "max": 0xFF, "ok": True, "sw": False}
     b = line_bytes(prt, tbl)
     text = bytes(b).decode("ascii")
     print("      line: %r  (%d bytes)" % (text, len(b)))
-    check(len(b) == 44, "line is exactly 44 bytes", "got %d" % len(b))
-    check(text == "MH1 K V=1324 S=0123ABCD N=016080 L=00 H=FF\r\n",
+    check(len(b) == 52, "line is exactly 52 bytes", "got %d" % len(b))
+    check(text == "MH1 K V=1324 S=0123ABCD N=016080 L=00 H=FF P0=1324\r\n",
           "field layout / hex encoding correct", "got %r" % text)
     check(90240 == env["CAM_FRAME_PIX"],
           "N field 90240 == CAM_FRAME_PIX (016080 hex)")
@@ -894,6 +976,24 @@ def test_line(env):
     wrong["ver"] = 0x2413
     expect_fail(bytes(line_bytes(wrong, tbl)) == bytes(b),
                 "reversed nibble order would change the line")
+
+    # P0 carries the FIRST probe read with the same nibble order as V
+    v0 = dict(prt, ver0=0xABCD)
+    check(bytes(line_bytes(v0, tbl)).decode("ascii").endswith("P0=ABCD\r\n"),
+          "P0 encodes the first probe read, MSB first")
+    v0r = dict(prt, ver0=0xBADC)
+    expect_fail(bytes(line_bytes(v0, tbl)) == bytes(line_bytes(v0r, tbl)),
+                "reversed nibbles in P0 would change the line")
+
+    # The exact on-board failure signature must be readable off a single line
+    brd = dict(prt, ok=False, sw=False, ver=0x0000, ver0=0xFFFF)
+    bt = bytes(line_bytes(brd, tbl)).decode("ascii")
+    check(bt.startswith("MH1 F ") and "V=0000" in bt and "P0=FFFF" in bt,
+          "board signature renders as 'MH1 F ... V=0000 ... P0=FFFF'",
+          "got %r" % bt)
+    other = dict(brd, ver=0xFFFF)
+    expect_fail(bytes(line_bytes(brd, tbl)) == bytes(line_bytes(other, tbl)),
+                "V and P0 are independent fields (both-FFFF looks different)")
 
 
 def main():

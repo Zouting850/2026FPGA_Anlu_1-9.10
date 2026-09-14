@@ -16,13 +16,17 @@
 //   cam_pclk ≈ 13.5 MHz（bin2 后）—— DVP 采集、帧指纹累加
 //   跨域只搬运"帧完成"翻转信号 + 准静态快照（详见 frame_stat.v 注释）
 //
-// 串口输出格式（44 字节定长，\\r\\n 结尾）：
-//   MH1 K V=1324 S=xxxxxxxx N=xxxxxx L=xx H=xx
-//     K/F      = SCCB 自检通过/失败
-//     V        = 读回的芯片版本（应为 1324）
+// 串口输出格式（52 字节定长，CRLF 结尾）：
+//   MH1 K V=1324 S=xxxxxxxx N=xxxxxx L=xx H=ff P0=xxxx
+//     K/W/F    = SCCB 自检通过 / 通过但两线接反已换向 / 两种极性都不通
+//     V        = 最后一次读回的芯片版本（应为 1324）
 //     S        = 本帧像素灰度累加和（32bit）
 //     N        = 本帧有效像素数（应 = 90240 = 376*240）
 //     L / H    = 本帧最小 / 最大灰度
+//     P0       = 【诊断】第一次（极性 0）探测读到的 R0x00
+//                排障用：都不通时把 V 与 P0 摆在一起看 —— 一个大一个小说明
+//                其中一根线被拉低（短路/下拉/改造接错）；两个都是 FFFF 说明
+//                两根线都没有任何东西在应答（断路、或改造没把 IIC 引出来）。
 // ============================================================
 `include "vision_def.v"
 
@@ -44,7 +48,7 @@ module top_vision_m1
 	output[3:0]                 led          // A4 A3 C10 B12
 );
 
-localparam LINE_LEN = 6'd44;
+localparam LINE_LEN = 6'd52;
 
 // ------------------------------------------------------------
 // 上电复位 + 双域复位同步
@@ -91,6 +95,7 @@ wire        cfg_busy;
 wire        cfg_done;
 wire        cam_ok;
 wire[15:0]  ver_rd;
+wire[15:0]  ver_rd0;     // 极性 0 那一次探测的读值（排障用，见 mt9v034_cfg.v）
 wire[3:0]   wr_idx;
 wire[3:0]   err_cnt;
 
@@ -111,6 +116,7 @@ mt9v034_cfg u_cfg
 	.cfg_done   (cfg_done),
 	.cam_ok     (cam_ok),
 	.ver_rd     (ver_rd),
+	.ver_rd0    (ver_rd0),
 	.wr_idx     (wr_idx),
 	.err_cnt    (err_cnt)
 );
@@ -231,6 +237,7 @@ end
 // 打印寄存器（发送开始时从快照锁存，保证整行一致）
 // ------------------------------------------------------------
 reg[15:0] prt_ver;
+reg[15:0] prt_ver0;    // P0 = 第一次（极性 0）探测读值；与 V 对照可定位是哪根线不通
 reg[31:0] prt_sum;
 reg[23:0] prt_cnt;
 reg[7:0]  prt_min;
@@ -274,8 +281,12 @@ function[7:0] fixed_char;
 			6'd37: fixed_char = 8'h20;
 			6'd38: fixed_char = 8'h48;   // 'H'
 			6'd39: fixed_char = 8'h3D;
-			6'd42: fixed_char = 8'h0D;   // CR
-			6'd43: fixed_char = 8'h0A;   // LF
+			6'd42: fixed_char = 8'h20;
+			6'd43: fixed_char = 8'h50;   // 'P'
+			6'd44: fixed_char = 8'h30;   // '0'
+			6'd45: fixed_char = 8'h3D;   // '='
+			6'd50: fixed_char = 8'h0D;   // CR
+			6'd51: fixed_char = 8'h0A;   // LF
 			default: fixed_char = 8'h00; // 0x00 表示该位为动态 hex
 		endcase
 	end
@@ -317,6 +328,11 @@ function[7:0] line_byte;
 			nb = 4'd1 - (i - 6'd40);
 			vtmp = {24'd0, prt_max};
 			line_byte = hexc(vtmp[nb*4 +: 4]);
+		end
+		else if((i >= 6'd46) && (i <= 6'd49))                    // P0 = 4 hex
+		begin
+			nb = 4'd3 - (i - 6'd46);
+			line_byte = hexc(prt_ver0[nb*4 +: 4]);
 		end
 		else if(i == 6'd4)                                       // 自检标志
 			// 'K' = 通且两线是正常接法；'W' = 通但两线接反、已自动换向；
@@ -417,6 +433,7 @@ begin
 		tx_req  <= 1'b0;
 		tx_data <= 8'd0;
 		prt_ver <= 16'd0;
+		prt_ver0<= 16'd0;
 		prt_sum <= 32'd0;
 		prt_cnt <= 24'd0;
 		prt_min <= 8'h00;
@@ -433,6 +450,7 @@ begin
 				if(send_pend == 1'b1)
 				begin
 					prt_ver <= ver_rd;
+					prt_ver0<= ver_rd0;
 					prt_sum <= snap_sum;
 					prt_cnt <= snap_cnt;
 					prt_min <= snap_min;

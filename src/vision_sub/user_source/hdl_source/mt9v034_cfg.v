@@ -13,6 +13,14 @@
 //       → 探测成功才继续：逐条写配置表 → 稳定等待 → 再读 R0x00 校验
 //       → 版本 = 0x1324 → cam_ok=1；否则重写配置表，最多 3 次
 //       → 探测两次都失败 → cam_ok=0（线路/上拉/供电问题，不是接反）
+//       → 【自动重试】cam_ok=0 时每 PROBE_RETRY_CNT（2s）自动重走一遍探测，
+//         现场改完接线/补完上拉只需等 2 秒，不必重新烧 bit
+//
+// 【诊断输出】ver_rd0 = 极性 0 那一次的读值，ver_rd = 最后一次的读值。
+//   两个摆在一起就能分辨"哪根线读全 1、哪根读全 0"：
+//     正常/接反 → 两者都能读到 0x1324（只是 swap 不同）
+//     都不通    → 例如 ver_rd0=0xFFFF、ver_rd=0x0000，说明一根悬空、一根被拉低
+//   这一对值是现场区分"断线 / 缺上拉 / 短路 / 改造没通"的关键证据。
 //
 // 【为什么要先探测极性】
 //   改造后的总钻风把 CMOS 的 SCCB 两线引到 FFC 的 TXD/RXD，转接板 V3.1 又原样
@@ -56,7 +64,11 @@ module mt9v034_cfg
 	output reg                  cfg_busy,
 	output reg                  cfg_done,
 	output reg                  cam_ok,
-	output reg[15:0]            ver_rd,     // 读回的 R0x00
+	output reg[15:0]            ver_rd,     // 最后一次读回的 R0x00
+	output reg[15:0]            ver_rd0,    // 【诊断】第一次（极性 0）探测读到的值
+	                                        //   排障用：和 ver_rd 摆在一起就能看出
+	                                        //   "哪根线读全 1、哪根读全 0"。
+	                                        //   两根线都正常时应与 ver_rd 同为 0x1324。
 	output reg[3:0]             wr_idx,
 	output reg[3:0]             err_cnt     // 版本校验失败次数
 );
@@ -137,6 +149,7 @@ begin
 		cfg_done   <= 1'b0;
 		cam_ok     <= 1'b0;
 		ver_rd     <= 16'd0;
+		ver_rd0    <= 16'd0;
 		wr_idx     <= 4'd0;
 		err_cnt    <= 4'd0;
 	end
@@ -199,6 +212,9 @@ begin
 			if(sccb_ack == 1'b1)
 			begin
 				ver_rd <= sccb_rdata;
+				// 只留住"极性 0"那一次：它是"按标注接线时这根线读到什么"的直接证据
+				if(trial == 1'b0)
+					ver_rd0 <= sccb_rdata;
 				st     <= C_PR_CHK;
 			end
 
@@ -223,11 +239,14 @@ begin
 				end
 				else
 				begin
-					// 两种极性都读不到 0x1324
-					// → 不是接反，去查线路/上拉/供电（状态行会打出 F 和 V=FFFF）
+					// 两种极性都读不到 0x1324 → 不是接反，去查线路/上拉/供电。
+					// 状态行会打出 F，并用 V（第二次读）与 P0（第一次读）把
+					// 两根线各自的静态电平暴露出来。进入 C_DONE 时清零 wait_cnt，
+					// 让自动重试从整段延时开始计。
 					cam_ok   <= 1'b0;
 					cfg_busy <= 1'b0;
 					cfg_done <= 1'b1;
+					wait_cnt <= 32'd0;
 					st       <= C_DONE;
 				end
 			end
@@ -341,6 +360,7 @@ begin
 						cam_ok   <= 1'b0;
 						cfg_busy <= 1'b0;
 						cfg_done <= 1'b1;
+						wait_cnt <= 32'd0;       // 自动重试的延时从这里开始计
 						st       <= C_DONE;
 					end
 					else
@@ -365,9 +385,36 @@ begin
 					retry_cnt <= 4'd0;
 					wr_idx    <= 4'd0;
 					wait_cnt  <= 32'd0;
-					// 重新走一遍极性探测：允许用户换过线之后不改 bit 直接复位重试
+					trial     <= 1'b0;
+					sccb_swap <= 1'b0;
+					ver_rd0   <= 16'd0;
+					// 重新走一遍极性探测：允许用户换过线之后不改 bit 直接重试
 					st        <= C_PWRWAIT;
 				end
+				else if(cam_ok == 1'b0)
+				begin
+					// 【自动重试】两种极性都不通（cam_ok=0）时，每 PROBE_RETRY_CNT
+					// 自动重走一遍完整探测（含极性重探）。现场排障时"改接线 → 复位
+					// 重试"是最慢的一环，有了这条就变成"改完等 2 秒"。
+					// 探测成功后不再重试；一帧图像采集照常，不受影响。
+					if(wait_cnt == (`PROBE_RETRY_CNT - 32'd1))
+					begin
+						cfg_done  <= 1'b0;
+						cfg_busy  <= 1'b1;
+						cam_ok    <= 1'b0;
+						retry_cnt <= 4'd0;
+						wr_idx    <= 4'd0;
+						wait_cnt  <= 32'd0;
+						trial     <= 1'b0;
+						sccb_swap <= 1'b0;
+						ver_rd0   <= 16'd0;
+						st        <= C_PWRWAIT;
+					end
+					else
+						wait_cnt <= wait_cnt + 32'd1;
+				end
+				else
+					wait_cnt <= 32'd0;
 			end
 
 			default:
