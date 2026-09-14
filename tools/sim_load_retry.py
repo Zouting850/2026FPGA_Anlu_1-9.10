@@ -40,6 +40,24 @@ Scenarios
   E  picture 1 dies on the stall watchdog instead of load_failed
   F  CONTROL  same single failure as B, pre-fix scheduler with no retry
 
+Pass G covers the adjustable carousel interval (SPED n, n = 1..8 seconds).
+tools/sim_uart_ctrl.py proves the command reaches sd_card_clk with the right
+value; it cannot say anything about what sd_card_bmp then does with it, because
+the interval counter lives here, in the tightest clock domain, alongside the
+load watchdog. Two granularities are modelled:
+
+  - Design.carousel() drives one auto_tick per step, so it checks the rotation
+    semantics -- which picture comes up, and that every manual advance / SPED
+    write / auto-off restarts the interval instead of inheriting a part-elapsed
+    one.
+  - IntervalCounter() runs the real cycle loop and checks the arithmetic: the
+    interval has to be exactly n * CLK_FREQ_HZ cycles, with no off-by-one in
+    either counter.
+
+A-F stay untouched by this feature and are its retreat proof: with no SPED
+command ever sent, sec_target is 1, sec_last is constantly true, and the
+advance condition reduces to the bare auto_tick the RTL has always had.
+
 Run:  python tools/sim_load_retry.py
 """
 
@@ -56,7 +74,8 @@ REGS = ('img_found_count img_loaded_count next_load_idx img_idx disp_buf_idx '
         'load_buf_idx write_buf_idx load_idx load_sector load_busy '
         'load_retry_cnt load_stall_cnt source_done_seen write_done_seen '
         'scan_kicked first_image_committed display_valid scan_done '
-        'scan_raw_only raw_fallback_started load_abort').split()
+        'scan_raw_only raw_fallback_started load_abort '
+        'sec_cnt sec_target_m1').split()
 
 
 def next_index_limited(cur, count):
@@ -72,7 +91,8 @@ def next_index_limited(cur, count):
 class Design:
     """sd_card_bmp's scheduler plus just enough bmp_read to drive it."""
 
-    def __init__(self, fail_plan=None, stall_plan=None, retry_enabled=True):
+    def __init__(self, fail_plan=None, stall_plan=None, retry_enabled=True,
+                 speed_bug=None):
         # fail_plan[pic] = how many leading attempts of that picture fail
         self.fail_plan = dict(fail_plan or {})
         # stall_plan[pic] = set of attempt numbers that go silent instead
@@ -81,6 +101,14 @@ class Design:
         # load_busy and nothing else: next_load_idx had already advanced, so
         # the picture was lost for good. Used as a negative control.
         self.retry_enabled = retry_enabled
+        # Same idea for the carousel interval -- each value removes one line
+        # the RTL has to have, so Pass G can show the matching check actually
+        # bites:
+        #   'no_gate'           sec_last forced true, i.e. today's RTL
+        #   'no_reset_on_speed' SPED writes the target but not sec_cnt
+        #   'no_reset_on_next'  a manual NEXT leaves sec_cnt part-elapsed
+        #   'off_by_one'        sec_target_m1 gets the value, not value-1
+        self.speed_bug = speed_bug
 
         for r in REGS:
             setattr(self, r, False if r.endswith(('busy', 'seen', 'kicked',
@@ -159,7 +187,14 @@ class Design:
         return ready, failed, wfinish, progress
 
     # ---- sd_card_bmp ----------------------------------------------------
-    def step(self, scan_found_valid=False, auto_tick=False):
+    def step(self, scan_found_valid=False, auto_tick=False, next_press=False,
+             speed_set=None):
+        """One sd_card_clk cycle.
+
+        auto_tick is the 1 s tick the RTL derives from auto_cnt; next_press is
+        key_next_press/cmd_next_pulse; speed_set is the value a SPED command
+        delivers, in whole seconds, or None for no command.
+        """
         old = {r: getattr(self, r) for r in REGS}
         nxt = dict(old)
 
@@ -240,12 +275,45 @@ class Design:
             nxt['img_loaded_count'] = 0
             nxt['next_load_idx'] = 0
             nxt['load_retry_cnt'] = 0
+            nxt['sec_cnt'] = 0
         else:
-            if (self.auto_play_en and old['first_image_committed'] and
-                    old['img_loaded_count'] > 1 and auto_tick):
+            # The RTL drives auto_play_en from key_auto_press/cmd_auto_pulse;
+            # the drivers here set it as a plain attribute instead, so the
+            # auto-toggle reset site is not exercised at this level. It is
+            # covered structurally by the RTL transcription gate, as are the
+            # IMGX, load-arming, !sd_init_done and async-reset sites.
+            auto_run = (self.auto_play_en and old['first_image_committed'] and
+                        old['img_loaded_count'] > 1)
+            if not auto_run:
+                nxt['sec_cnt'] = 0
+            elif auto_tick:
+                sec_last = (True if self.speed_bug == 'no_gate'
+                            else old['sec_cnt'] == old['sec_target_m1'])
+                if sec_last:
+                    n = next_index_limited(old['img_idx'],
+                                           old['img_loaded_count'])
+                    nxt['img_idx'] = n
+                    nxt['disp_buf_idx'] = n
+                    nxt['sec_cnt'] = 0
+                else:
+                    nxt['sec_cnt'] = (old['sec_cnt'] + 1) & 7
+
+            if (next_press and old['first_image_committed'] and
+                    old['img_loaded_count'] > 1):
                 n = next_index_limited(old['img_idx'], old['img_loaded_count'])
                 nxt['img_idx'] = n
                 nxt['disp_buf_idx'] = n
+                if self.speed_bug != 'no_reset_on_next':
+                    nxt['sec_cnt'] = 0
+
+            # Not gated on first_image_committed, matching the RTL: the
+            # interval is configuration, so a SPED that lands during the
+            # initial scan still has to take effect.
+            if speed_set is not None:
+                nxt['sec_target_m1'] = (speed_set if self.speed_bug == 'off_by_one'
+                                        else speed_set - 1) & 7
+                if self.speed_bug != 'no_reset_on_speed':
+                    nxt['sec_cnt'] = 0
 
             arm = (old['scan_done'] and bmp_ready and not old['load_busy'] and
                    old['next_load_idx'] < old['img_found_count'] and
@@ -297,6 +365,96 @@ class Design:
             out.append(self.img_idx + 1)
         return out
 
+    def carousel(self, ticks, speed=None):
+        """Same shape as rotation(), plus an optional SPED write up front.
+
+        speed is the interval in whole seconds; None leaves sec_target alone,
+        which is how the "no command ever sent" retreat is driven.
+        """
+        if self.img_loaded_count < 2 or not self.display_valid:
+            return []
+        self.auto_play_en = True
+        if speed is not None:
+            self.step(speed_set=speed)
+        out = []
+        for _ in range(ticks):
+            self.step(auto_tick=True)
+            out.append(self.img_idx + 1)
+        return out
+
+
+def changes(seq, start):
+    """1-based positions in seq whose value differs from its predecessor."""
+    out = []
+    prev = start
+    for i, v in enumerate(seq, start=1):
+        if v != prev:
+            out.append(i)
+        prev = v
+    return out
+
+
+def prepared():
+    """A Design whose scheduler has settled with all four pictures loaded."""
+    d = Design()
+    d.run()
+    return d
+
+
+def prepared_bug(bug):
+    """prepared(), but with one interval line deliberately missing."""
+    d = Design(speed_bug=bug)
+    d.run()
+    return d
+
+
+class IntervalCounter:
+    """Cycle-level model of sd_card_bmp's auto_cnt / sec_cnt pair.
+
+    Design.carousel() collapses a whole second into one auto_tick, which is the
+    right granularity for rotation order but blind to the arithmetic. This runs
+    the counters cycle by cycle instead.
+
+    STALL_LIMIT stands in for CLK_FREQ_HZ exactly as it already does for the
+    watchdog in Design.step. That is not a coincidence to be tidied away: the
+    RTL spells both counters with the same constant expression, so scaling it
+    once here preserves the ratio the hardware has.
+    """
+
+    TICK_LIMIT = STALL_LIMIT
+
+    def __init__(self, sec=1, bug=None):
+        self.bug = bug
+        self.auto_cnt = 0
+        self.sec_cnt = 0
+        self.sec_target_m1 = sec if bug == 'off_by_one' else sec - 1
+
+    def cycle(self):
+        """One sd_card_clk cycle. True when the picture would change."""
+        tick = (self.auto_cnt == self.TICK_LIMIT - 1)
+        self.auto_cnt = 0 if tick else self.auto_cnt + 1
+        if not tick:
+            return False
+        last = (True if self.bug == 'no_gate'
+                else self.sec_cnt == self.sec_target_m1)
+        if last:
+            self.sec_cnt = 0
+            return True
+        self.sec_cnt = (self.sec_cnt + 1) & 7
+        return False
+
+    def first_two(self, limit=None):
+        """1-based cycle numbers of the first two picture changes."""
+        if limit is None:
+            limit = self.TICK_LIMIT * (self.sec_target_m1 + 2) * 2 + 8
+        hits = []
+        for c in range(1, limit + 1):
+            if self.cycle():
+                hits.append(c)
+                if len(hits) == 2:
+                    break
+        return hits
+
 
 def report(name, design, expect_loaded, expect_rot, expect_arms=None):
     design.run()
@@ -329,6 +487,99 @@ def report(name, design, expect_loaded, expect_rot, expect_arms=None):
     return ok
 
 
+def pass_g():
+    """Pass G -- adjustable carousel interval (SPED n, n = 1..8 seconds)."""
+    print('=' * 64)
+    print('G. Adjustable carousel interval')
+    print('=' * 64)
+    res = []
+
+    def check(name, got, want):
+        ok = got == want
+        res.append(ok)
+        print(f'  {"PASS" if ok else "FAIL"}  {name}')
+        if not ok:
+            print(f'        got  {got}')
+            print(f'        want {want}')
+
+    def ticks_of(design, ticks, speed=None):
+        """1-based tick positions at which the picture changed."""
+        before = design.img_idx + 1
+        return changes(design.carousel(ticks, speed=speed), before)
+
+    # G1 -- the retreat. No SPED ever sent, so sec_target is its reset value 1
+    # and the rotation has to be bit-for-bit what it was before this feature.
+    check('G1  zero traffic -> interval stays 1 s, rotation unchanged',
+          prepared().carousel(8), [2, 3, 4, 1] * 2)
+
+    # G2 -- the interval actually stretches.
+    for sec, ticks in ((4, 12), (8, 16)):
+        check(f'G2  SPED {sec} advances once every {sec} ticks over {ticks}',
+              ticks_of(prepared(), ticks, speed=sec),
+              list(range(sec, ticks + 1, sec)))
+
+    # G3 -- stretching the interval must not reorder anything underneath it.
+    check('G3  SPED 4 rotation order over 12 ticks',
+          prepared().carousel(12, speed=4),
+          [1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4])
+
+    # G4/G5/G6 -- every site that clears auto_cnt has to clear sec_cnt too,
+    # or the next interval inherits a part-elapsed one and comes up short.
+    d = prepared()
+    d.carousel(3, speed=8)                    # leaves sec_cnt at 3 of 8
+    check('G4  SPED 2 after a part-elapsed SPED 8 restarts the interval',
+          ticks_of(d, 4, speed=2), [2, 4])
+
+    d = prepared()
+    d.carousel(2, speed=4)                    # leaves sec_cnt at 2 of 4
+    d.step(next_press=True)
+    check('G5  a manual NEXT restarts the interval',
+          ticks_of(d, 4), [4])
+
+    d = prepared()
+    d.carousel(2, speed=4)
+    d.auto_play_en = False
+    d.step()                                  # the auto-off else branch
+    check('G6  turning auto play off and back on restarts the interval',
+          ticks_of(d, 4), [4])
+
+    # G7 -- cycle-level arithmetic: n seconds is exactly n * CLK_FREQ_HZ
+    # cycles, for every value the parser accepts.
+    for sec in range(1, 9):
+        check(f'G7  SPED {sec} -> {STALL_LIMIT * sec} cycles between changes',
+              IntervalCounter(sec=sec).first_two(),
+              [STALL_LIMIT * sec, STALL_LIMIT * sec * 2])
+
+    # G8 -- negative controls. Each removes exactly one line the RTL has to
+    # have; if the matching check above still passed against these, it would
+    # be testing nothing.
+    check('G8a CONTROL  no sec gate -> SPED 4 still advances every tick',
+          ticks_of(prepared_bug('no_gate'), 12, speed=4), list(range(1, 13)))
+    check('G8b CONTROL  target off by one -> SPED 4 advances at 5 and 10',
+          ticks_of(prepared_bug('off_by_one'), 10, speed=4), [5, 10])
+
+    d = prepared_bug('no_reset_on_speed')
+    d.carousel(3, speed=8)
+    check('G8c CONTROL  SPED without a sec_cnt reset -> interval inherited',
+          ticks_of(d, 4, speed=2), [])
+
+    d = prepared_bug('no_reset_on_next')
+    d.carousel(2, speed=4)
+    d.step(next_press=True)
+    check('G8d CONTROL  NEXT without a sec_cnt reset -> next interval short',
+          ticks_of(d, 4), [2])
+
+    check('G8e CONTROL  cycle counter with no gate -> 1 s even at SPED 4',
+          IntervalCounter(sec=4, bug='no_gate').first_two(),
+          [STALL_LIMIT, STALL_LIMIT * 2])
+    check('G8f CONTROL  cycle counter off by one -> 5 s at SPED 4',
+          IntervalCounter(sec=4, bug='off_by_one').first_two(),
+          [STALL_LIMIT * 5, STALL_LIMIT * 10])
+
+    print()
+    return res
+
+
 def main():
     four = [2, 3, 4, 1] * 3
     three = [2, 3, 1] * 4
@@ -351,6 +602,7 @@ def main():
                Design(fail_plan={2: 1}, retry_enabled=False), 3, three,
                expect_arms=4),
     ]
+    results += pass_g()
     print('=' * 64)
     verdict = 'ALL SCENARIOS PASS' if all(results) else 'FAILURES PRESENT'
     print(f'{verdict}   ({sum(results)}/{len(results)})')

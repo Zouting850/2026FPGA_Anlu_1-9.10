@@ -29,13 +29,15 @@ What it verifies (passes A-F)
 -----------------------------
   A. RX byte decode at the real divider (CLKS_PER_BIT = 50e6/9600 = 5208):
      a "NEXT" frame arrives as the exact 7 bytes on the wire.
-  B. Parser command effects for all ten commands, plus the exact-length /
+  B. Parser command effects for all eleven commands, plus the exact-length /
      argument guards. MODE and FILT take ONE uppercase hex character and span
-     the whole 0..F range; lowercase, 'G', a two-digit argument, and every
-     out-of-range digit on the other commands must NOT fire. A rejected frame
-     must not wedge the parser.
+     the whole 0..F range; SPED takes ONE decimal digit and spans 1..8 seconds,
+     the floor being set by the ~0.83 s band transition rather than by taste.
+     Lowercase, 'G', a two-digit argument, and every out-of-range digit on the
+     other commands must NOT fire. A rejected frame must not wedge the parser.
   C. Toggle-CDC: every clk-domain command produces exactly ONE sd_card_clk
-     pulse (no loss, no double), and IMGX carries the right 2-bit value.
+     pulse (no loss, no double), and IMGX / SPED each carry the right value on
+     their own data+toggle pair.
   D. Override mux + brightness merge + the FILT/FONT/MUSC crossing chains:
        - no screen command  -> trans_mode == ~sw and marquee_en == sw4,
                                bit-identical to the verified baseline;
@@ -66,7 +68,10 @@ What it verifies (passes A-F)
        - full retreat: zero commands ever sent -> outputs track sw exactly,
          not one spurious pulse is emitted, filt_frame/font_frame stay 0
          (passthrough / flat glyphs), the audio source stays at its
-         AUDIO_SRC_DEFAULT reset value in both domains, and the physical
+         AUDIO_SRC_DEFAULT reset value in both domains, the carousel interval
+         stays at AUTO_SEC_DEFAULT in the sd domain (asserted for two different
+         parameter values, so it is the parameter being proved and not a
+         coincidence of the reset value happening to be 1), and the physical
          trans_mode branch never exceeds 7 despite the 4-bit wire -- the
          property that keeps the new transitions serial-port-only.
   F. Link-debug registers behind LEDs A4/A3/C10 (uart_tx has no readback, so
@@ -121,6 +126,35 @@ CPB_REAL = 50_000_000 // 9600  # 5208, what actually ships
 # the RTL's c5_is_hex excludes 'a'-'f', and Pass B asserts that.
 HEX_DIGITS = "0123456789ABCDEF"
 
+# SPED's accepted argument alphabet: the carousel interval in whole seconds.
+# The floor is 1 s, not 0, because the longest transition has to finish before
+# the next picture change is asked for -- a band effect runs WIPE_HOLD 40 +
+# FADE_IN 8 + WIPE_SETTLE 2 = 50 frames, about 0.83 s at 60 Hz, so the shipped
+# 1 s interval already leaves only ~0.17 s of still picture. Anything faster
+# would chain half-finished transitions into a continuous sweep. Pass B asserts
+# that both '0' and '9' are rejected.
+SPEED_DIGITS = "12345678"
+
+
+# Two identical uart_screen_ctrl instances now feed one merge point, so the model
+# instantiates a whole RX + parser register set per port. These are the names.
+RX_KEYS = ('rx_sync', 'rx_state', 'rx_cnt', 'rx_bit', 'rx_shift', 'rx_byte',
+           'rx_valid')
+FRM_KEYS = ('c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'clen', 'ffc',
+            'dbg_rx_toggle', 'dbg_rx_ff')
+PULSE_KEYS = ('cmd_next_pulse', 'cmd_auto_pulse', 'cmd_bright_cycle_pulse')
+# value + one-clock strobe. The strobe name does not always match the value name
+# (cmd_bright_set / cmd_bright_set_v), so the pairs are spelled out.
+VAL_PAIRS = (('cmd_bright_set', 'cmd_bright_set_v', 3),
+             ('cmd_mode', 'cmd_mode_set', 4),
+             ('cmd_marquee', 'cmd_marquee_set', 1),
+             ('cmd_img_sel', 'cmd_img_sel_set', 2),
+             ('cmd_filt', 'cmd_filt_set', 4),
+             ('cmd_font', 'cmd_font_set', 1),
+             ('cmd_audio', 'cmd_audio_set', 1),
+             ('cmd_speed', 'cmd_speed_set', 4))
+PORTS = ('j1_', 'pc_')
+
 
 def frame(cmd_str):
     """ASCII bytes of a command + the TJC three-byte terminator."""
@@ -148,16 +182,44 @@ def build_rx_wave(byte_list, cpb, idle_before=8, idle_between=2, idle_after=48):
     return levels
 
 
+def _inst_regs():
+    """
+    Register set of ONE uart_screen_ctrl instance, unprefixed. Both command
+    ports get a copy, so this is the single definition of what an instance holds
+    and the parser only ever touches these names through a port prefix.
+    """
+    d = {k: 0 for k in RX_KEYS + FRM_KEYS + PULSE_KEYS}
+    for val, strobe, _bits in VAL_PAIRS:
+        d[val] = 0
+        d[strobe] = 0
+    d['rx_sync'] = 0b11
+    d['rx_state'] = RX_IDLE
+    return d
+
+
+INST_KEYS = tuple(_inst_regs())
+
+
 class System(object):
     """Mirrors every register of the three clock domains in the RTL."""
 
-    def __init__(self, cpb=CPB_FAST, sw=0xF, audio_default=0):
+    def __init__(self, cpb=CPB_FAST, sw=0xF, audio_default=0, auto_sec_default=1,
+                 pc_cmd_enable=1):
         self.cpb = cpb
         self.sw = sw                # physical DIP: sw[2:0]=SW1-3, sw[3]=SW4
         self.audio_default = audio_default   # top's AUDIO_SRC_DEFAULT parameter
+        self.auto_sec_default = auto_sec_default   # top's AUTO_SEC_DEFAULT
+        # top's PC_CMD_ENABLE: 0 must leave the Type-C bundle with zero effect AND
+        # zero loads, which is what makes it a real one-line retreat.
+        self.pc_cmd_enable = pc_cmd_enable
+        # Negative control only: replace the RTL's priority mux with a bitwise
+        # OR and watch a value appear that neither port ever sent. Nothing on the
+        # happy path constructs a System with this set.
+        self.merge_naive = 0
         self.key3_press = 0         # one-shot clk-domain pulse (injectable)
         self.vs_pin = 1             # video_clk vsync level (injectable, idles high)
-        self.rx_levels = []
+        self.rx_levels = []         # J1 / D14
+        self.rx_levels_pc = []      # Type-C / F12
         self.clk_n = 0
         self.sd_n = 0
         self.vid_n = 0
@@ -165,42 +227,30 @@ class System(object):
         self.log = {'next': 0, 'auto': 0, 'bright_cycle': 0,
                     'bright_set': [], 'mode_set': [], 'marquee_set': [],
                     'img_set': [], 'filt_set': [], 'font_set': [],
-                    'audio_set': [], 'rx': []}
-        self.sdlog = {'next': 0, 'auto': 0, 'img': 0, 'img_vals': []}
+                    'audio_set': [], 'speed_set': [], 'rx': [], 'rx_pc': []}
+        self.sdlog = {'next': 0, 'auto': 0, 'img': 0, 'img_vals': [],
+                      'speed': 0, 'speed_vals': []}
 
     def _reset_state(self):
         s = {}
-        # --- clk domain: uart_screen_ctrl RX ---
-        s['rx_sync'] = 0b11
-        s['rx_state'] = RX_IDLE
-        s['rx_cnt'] = 0
-        s['rx_bit'] = 0
-        s['rx_shift'] = 0
-        s['rx_byte'] = 0
-        s['rx_valid'] = 0
-        # --- clk domain: parser ---
-        s['c0'] = s['c1'] = s['c2'] = s['c3'] = s['c4'] = s['c5'] = 0
-        s['clen'] = 0
-        s['ffc'] = 0
+        # --- clk domain: two uart_screen_ctrl instances, RX + parser, one per
+        #     command port (J1 / D14 and Type-C / F12). ---
+        for pfx in PORTS:
+            for k, v in _inst_regs().items():
+                s[pfx + k] = v
+        # --- top's merged command wires. Not registers: pure functions of the
+        #     two instances above, recomputed by _merge() at the start of every
+        #     clk edge. Seeded here only so the keys exist before the first one.
+        for k in PULSE_KEYS:
+            s[k] = 0
+        for val, strobe, _bits in VAL_PAIRS:
+            s[val] = 0
+            s[strobe] = 0
+        # Same treatment for the debug taps: led[0]/led[1] show the J1
+        # instance's raw byte/terminator observers, led[3] the PC one's.
         s['dbg_rx_toggle'] = 0
         s['dbg_rx_ff'] = 0
-        s['cmd_next_pulse'] = 0
-        s['cmd_auto_pulse'] = 0
-        s['cmd_bright_cycle_pulse'] = 0
-        s['cmd_bright_set'] = 0
-        s['cmd_bright_set_v'] = 0
-        s['cmd_mode'] = 0
-        s['cmd_mode_set'] = 0
-        s['cmd_marquee'] = 0
-        s['cmd_marquee_set'] = 0
-        s['cmd_img_sel'] = 0
-        s['cmd_img_sel_set'] = 0
-        s['cmd_filt'] = 0
-        s['cmd_filt_set'] = 0
-        s['cmd_font'] = 0
-        s['cmd_font_set'] = 0
-        s['cmd_audio'] = 0
-        s['cmd_audio_set'] = 0
+        s['dbg_pc_cmd_toggle'] = 0
         # --- clk domain: brightness + override latch + toggle gen ---
         s['brightness'] = 2
         s['sw_c0'] = s['sw_c1'] = s['sw_c2'] = 7
@@ -216,11 +266,18 @@ class System(object):
         s['auto_tgl'] = 0
         s['img_tgl'] = 0
         s['img_sel_lat'] = 0
+        s['spd_tgl'] = 0
+        # Latched argument for the data+toggle crossing. It resets to the top's
+        # AUTO_SEC_DEFAULT so that "no command was ever sent" is observable as a
+        # real value on the sd side rather than as a don't-care.
+        s['speed_lat'] = self.auto_sec_default
         # --- sd_card_clk domain ---
         s['next_tgl_s0'] = s['next_tgl_s1'] = s['next_tgl_s2'] = 0
         s['auto_tgl_s0'] = s['auto_tgl_s1'] = s['auto_tgl_s2'] = 0
         s['img_tgl_s0'] = s['img_tgl_s1'] = s['img_tgl_s2'] = 0
         s['img_sel_s0'] = s['img_sel_s1'] = 0
+        s['spd_tgl_s0'] = s['spd_tgl_s1'] = s['spd_tgl_s2'] = 0
+        s['speed_s0'] = s['speed_s1'] = self.auto_sec_default
         s['music_en_s0'] = s['music_en_s1'] = self.audio_default
         # --- video_clk domain ---
         s['sw_v0'] = s['sw_v1'] = 7
@@ -272,131 +329,217 @@ class System(object):
     def cmd_img_sel_pulse_sd(self):
         return self.st['img_tgl_s1'] ^ self.st['img_tgl_s2']
 
+    def cmd_speed_pulse_sd(self):
+        return self.st['spd_tgl_s1'] ^ self.st['spd_tgl_s2']
+
+    def speed_sd(self):
+        """sd_card_clk view: the interval in seconds sd_card_bmp would latch."""
+        return self.st['speed_s1']
+
+    def j1(self, name):
+        """
+        A register inside the J1 instance, by its unprefixed RTL name.
+
+        Needed for anything that asserts on a HELD command value: top's merged
+        cmd_mode / cmd_filt / cmd_speed wires are muxed outputs, not latches, so
+        they collapse to the other port's value the moment their strobe drops.
+        Reading them after a frame settles would report 0, not the last command.
+        """
+        return self.st['j1_' + name]
+
+    def pc(self, name):
+        """Same, for the Type-C instance."""
+        return self.st['pc_' + name]
+
+    # -- the one place two command sources become one ----------------------
+    def _merge(self, st):
+        """
+        top_tf_hdmi_audio's merge point, for the whole cmd_* bundle plus the
+        debug taps. Reads only the per-port instance registers, so it is a pure
+        function of Q and may be re-applied whenever a consumer needs the wire
+        view -- which in the RTL is always, because they ARE wires.
+
+        STROBES may be OR-ed: two sources firing the same one-clock pulse is
+        harmless, each consumer treats a pulse as "advance once".
+        VALUES may NOT. cmd_mode is a value paired with a one-clock cmd_mode_set
+        strobe, so OR-ing the two buses yields a code neither source ever sent
+        (MODE 1 | MODE E = 0xF). The RTL muxes them with J1 first; merge_naive
+        flips exactly that mux to an OR so the failure is demonstrated rather
+        than argued.
+
+        pc_cmd_enable gates the values as well as the strobes. Gating only the
+        strobes would leave `j1_set ? j1_val : pc_val` reading pc_val on every
+        cycle the J1 strobe is low -- one un-removed load, and the synthesiser
+        keeps the whole second instance alive (see the led[3] incident in
+        README). This mirrors that requirement instead of hoping for pruning.
+        """
+        en = self.pc_cmd_enable
+        out = {}
+        for k in PULSE_KEYS:
+            out[k] = (st['j1_' + k] | (st['pc_' + k] & en)) & 1
+        for val, strobe, bits in VAL_PAIRS:
+            mask = (1 << bits) - 1
+            js = st['j1_' + strobe]
+            ps = st['pc_' + strobe] & en
+            jv = st['j1_' + val]
+            pv = (st['pc_' + val] & mask) if en else 0
+            out[strobe] = js | ps
+            out[val] = ((jv | pv) if self.merge_naive
+                        else (jv if js else pv)) & mask
+        out['dbg_rx_toggle'] = st['j1_dbg_rx_toggle']
+        out['dbg_rx_ff'] = st['j1_dbg_rx_ff']
+        out['dbg_pc_cmd_toggle'] = st['pc_dbg_rx_toggle'] & en
+        return out
+
     # -- clock-edge handlers (non-blocking: read old, write nxt) ---------
-    def _do_clk(self):
-        s = self.st
-        n = self.clk_n
-        rx_pin = self.rx_levels[n] if n < len(self.rx_levels) else 1
-        nxt = {}
+    def _step_rx_parser(self, s, nxt, pfx, rx_pin):
+        """
+        One uart_screen_ctrl instance: RX FSM + framed-ASCII parser.
+
+        The port's registers are copied out unprefixed and written back through
+        nxt with the prefix, so the body below stays a literal transcription of
+        uart_screen_ctrl.v rather than a re-typing of it with 'j1_' / 'pc_'
+        pasted into every name. The two instances are identical RTL, so the two
+        models must be character-identical too -- that is the whole reason this
+        is a function of pfx instead of a copy-paste.
+
+        Registers that hold their value across an edge need no explicit line any
+        more: the copy starts from the old state, so w[k] already IS the hold.
+        Only the strobe-clearing default block and real transitions write.
+        """
+        r = {k: s[pfx + k] for k in INST_KEYS}
+        w = dict(r)
 
         # ---- RX FSM ----
-        rx_in = (s['rx_sync'] >> 1) & 1
-        nxt['rx_sync'] = ((s['rx_sync'] & 1) << 1) | rx_pin
-        rx_state_n, rx_cnt_n = s['rx_state'], s['rx_cnt']
-        rx_bit_n, rx_shift_n = s['rx_bit'], s['rx_shift']
-        rx_byte_n, rx_valid_n = s['rx_byte'], 0
+        rx_in = (r['rx_sync'] >> 1) & 1
+        w['rx_sync'] = ((r['rx_sync'] & 1) << 1) | rx_pin
+        rx_state_n, rx_cnt_n = r['rx_state'], r['rx_cnt']
+        rx_bit_n, rx_shift_n = r['rx_bit'], r['rx_shift']
+        rx_byte_n, rx_valid_n = r['rx_byte'], 0
         cpb = self.cpb
-        if s['rx_state'] == RX_IDLE:
+        if r['rx_state'] == RX_IDLE:
             rx_cnt_n, rx_bit_n = 0, 0
             if rx_in == 0:
                 rx_state_n = RX_START
-        elif s['rx_state'] == RX_START:
-            if s['rx_cnt'] == (cpb - 1) // 2:
+        elif r['rx_state'] == RX_START:
+            if r['rx_cnt'] == (cpb - 1) // 2:
                 if rx_in == 0:
                     rx_cnt_n, rx_state_n = 0, RX_DATA
                 else:
                     rx_state_n = RX_IDLE
             else:
-                rx_cnt_n = s['rx_cnt'] + 1
-        elif s['rx_state'] == RX_DATA:
-            if s['rx_cnt'] == cpb - 1:
+                rx_cnt_n = r['rx_cnt'] + 1
+        elif r['rx_state'] == RX_DATA:
+            if r['rx_cnt'] == cpb - 1:
                 rx_cnt_n = 0
-                rx_shift_n = ((rx_in << 7) | (s['rx_shift'] >> 1)) & 0xFF
-                rx_bit_n = (s['rx_bit'] + 1) & 7
-                if s['rx_bit'] == 7:
+                rx_shift_n = ((rx_in << 7) | (r['rx_shift'] >> 1)) & 0xFF
+                rx_bit_n = (r['rx_bit'] + 1) & 7
+                if r['rx_bit'] == 7:
                     rx_state_n = RX_STOP
             else:
-                rx_cnt_n = s['rx_cnt'] + 1
-        elif s['rx_state'] == RX_STOP:
-            if s['rx_cnt'] == cpb - 1:
+                rx_cnt_n = r['rx_cnt'] + 1
+        elif r['rx_state'] == RX_STOP:
+            if r['rx_cnt'] == cpb - 1:
                 rx_cnt_n, rx_state_n = 0, RX_IDLE
                 if rx_in == 1:
-                    rx_byte_n, rx_valid_n = s['rx_shift'], 1
+                    rx_byte_n, rx_valid_n = r['rx_shift'], 1
             else:
-                rx_cnt_n = s['rx_cnt'] + 1
-        nxt['rx_state'] = rx_state_n
-        nxt['rx_cnt'] = rx_cnt_n & 0xFFFF
-        nxt['rx_bit'] = rx_bit_n
-        nxt['rx_shift'] = rx_shift_n
-        nxt['rx_byte'] = rx_byte_n
-        nxt['rx_valid'] = rx_valid_n
+                rx_cnt_n = r['rx_cnt'] + 1
+        w['rx_state'] = rx_state_n
+        w['rx_cnt'] = rx_cnt_n & 0xFFFF
+        w['rx_bit'] = rx_bit_n
+        w['rx_shift'] = rx_shift_n
+        w['rx_byte'] = rx_byte_n
+        w['rx_valid'] = rx_valid_n
 
         # ---- parser (consumes the OLD rx_valid / rx_byte) ----
+        # mirrors the RTL's "default: every strobe/pulse is high for one clock
+        # only": the held value buses and the frame registers fall out of the
+        # copy above, so clearing these is all that is left.
         for k in ('cmd_next_pulse', 'cmd_auto_pulse', 'cmd_bright_cycle_pulse',
                   'cmd_bright_set_v', 'cmd_mode_set', 'cmd_marquee_set',
                   'cmd_img_sel_set', 'cmd_filt_set', 'cmd_font_set',
-                  'cmd_audio_set'):
-            nxt[k] = 0
-        nxt['cmd_bright_set'] = s['cmd_bright_set']
-        nxt['cmd_mode'] = s['cmd_mode']
-        nxt['cmd_marquee'] = s['cmd_marquee']
-        nxt['cmd_img_sel'] = s['cmd_img_sel']
-        nxt['cmd_filt'] = s['cmd_filt']
-        nxt['cmd_font'] = s['cmd_font']
-        nxt['cmd_audio'] = s['cmd_audio']
-        for k in ('c0', 'c1', 'c2', 'c3', 'c4', 'c5'):
-            nxt[k] = s[k]
-        nxt['clen'] = s['clen']
-        nxt['ffc'] = s['ffc']
-        nxt['dbg_rx_toggle'] = s['dbg_rx_toggle']
-        nxt['dbg_rx_ff'] = s['dbg_rx_ff']
+                  'cmd_audio_set', 'cmd_speed_set'):
+            w[k] = 0
 
-        if s['rx_valid']:
-            b = s['rx_byte']
+        if r['rx_valid']:
+            b = r['rx_byte']
             # observation-only, mirrors the RTL: driven before the 0xFF test so it
             # cannot perturb ffc / clen / any cmd_* effect.
-            nxt['dbg_rx_toggle'] = s['dbg_rx_toggle'] ^ 1
-            nxt['dbg_rx_ff'] = 1 if b == 0xFF else 0
+            w['dbg_rx_toggle'] = r['dbg_rx_toggle'] ^ 1
+            w['dbg_rx_ff'] = 1 if b == 0xFF else 0
             if b == 0xFF:
-                if s['ffc'] == 2:
-                    nxt['ffc'] = 0
-                    nxt['clen'] = 0
-                    key = bytes([s['c0'], s['c1'], s['c2'], s['c3']])
-                    clen, c4, c5 = s['clen'], s['c4'], s['c5']
+                if r['ffc'] == 2:
+                    w['ffc'] = 0
+                    w['clen'] = 0
+                    key = bytes([r['c0'], r['c1'], r['c2'], r['c3']])
+                    clen, c4, c5 = r['clen'], r['c4'], r['c5']
                     # c5_is_hex / c5_hex mirror the RTL wires of the same name.
                     # Lowercase is deliberately outside the accepted set.
                     c5_is_hex = (0x30 <= c5 <= 0x39) or (0x41 <= c5 <= 0x46)
                     c5_hex = (c5 - 0x30) if c5 <= 0x39 else (c5 - 0x41) + 10
                     if key == b"NEXT" and clen == 4:
-                        nxt['cmd_next_pulse'] = 1
+                        w['cmd_next_pulse'] = 1
                     elif key == b"AUTO" and clen == 4:
-                        nxt['cmd_auto_pulse'] = 1
+                        w['cmd_auto_pulse'] = 1
                     elif key == b"BRUP" and clen == 4:
-                        nxt['cmd_bright_cycle_pulse'] = 1
+                        w['cmd_bright_cycle_pulse'] = 1
                     elif key == b"BRGT" and clen == 6 and c4 == 0x20 \
                             and 0x30 <= c5 <= 0x34:
-                        nxt['cmd_bright_set'] = c5 - 0x30
-                        nxt['cmd_bright_set_v'] = 1
+                        w['cmd_bright_set'] = c5 - 0x30
+                        w['cmd_bright_set_v'] = 1
                     elif key == b"MODE" and clen == 6 and c4 == 0x20 and c5_is_hex:
-                        nxt['cmd_mode'] = c5_hex
-                        nxt['cmd_mode_set'] = 1
+                        w['cmd_mode'] = c5_hex
+                        w['cmd_mode_set'] = 1
                     elif key == b"MARQ" and clen == 6 and c4 == 0x20 \
                             and c5 in (0x30, 0x31):
-                        nxt['cmd_marquee'] = 1 if c5 == 0x31 else 0
-                        nxt['cmd_marquee_set'] = 1
+                        w['cmd_marquee'] = 1 if c5 == 0x31 else 0
+                        w['cmd_marquee_set'] = 1
                     elif key == b"IMGX" and clen == 6 and c4 == 0x20 \
                             and 0x31 <= c5 <= 0x34:
-                        nxt['cmd_img_sel'] = (c5 - 0x30 - 1) & 3
-                        nxt['cmd_img_sel_set'] = 1
+                        w['cmd_img_sel'] = (c5 - 0x30 - 1) & 3
+                        w['cmd_img_sel_set'] = 1
                     elif key == b"FILT" and clen == 6 and c4 == 0x20 and c5_is_hex:
-                        nxt['cmd_filt'] = c5_hex
-                        nxt['cmd_filt_set'] = 1
+                        w['cmd_filt'] = c5_hex
+                        w['cmd_filt_set'] = 1
                     elif key == b"FONT" and clen == 6 and c4 == 0x20 \
                             and c5 in (0x30, 0x31):
-                        nxt['cmd_font'] = 1 if c5 == 0x31 else 0
-                        nxt['cmd_font_set'] = 1
+                        w['cmd_font'] = 1 if c5 == 0x31 else 0
+                        w['cmd_font_set'] = 1
                     elif key == b"MUSC" and clen == 6 and c4 == 0x20 \
                             and c5 in (0x30, 0x31):
-                        nxt['cmd_audio'] = 1 if c5 == 0x31 else 0
-                        nxt['cmd_audio_set'] = 1
+                        w['cmd_audio'] = 1 if c5 == 0x31 else 0
+                        w['cmd_audio_set'] = 1
+                    elif key == b"SPED" and clen == 6 and c4 == 0x20 \
+                            and 0x31 <= c5 <= 0x38:
+                        w['cmd_speed'] = (c5 - 0x30) & 15
+                        w['cmd_speed_set'] = 1
                 else:
-                    nxt['ffc'] = (s['ffc'] + 1) & 3
+                    w['ffc'] = (r['ffc'] + 1) & 3
             else:
-                nxt['ffc'] = 0
-                if s['clen'] < 6:
-                    nxt['c%d' % s['clen']] = b
-                if s['clen'] < 15:
-                    nxt['clen'] = s['clen'] + 1
+                w['ffc'] = 0
+                if r['clen'] < 6:
+                    w['c%d' % r['clen']] = b
+                if r['clen'] < 15:
+                    w['clen'] = r['clen'] + 1
+
+        for k, v in w.items():
+            nxt[pfx + k] = v
+
+    def _do_clk(self):
+        s = self.st
+        n = self.clk_n
+        nxt = {}
+        # The merged cmd_* bundle is combinational, so every consumer below must
+        # see it as a function of THIS cycle's Q -- never of nxt. Refreshing it
+        # once here is what keeps the ~40 consumer lines below byte-identical to
+        # the single-port model.
+        s.update(self._merge(s))
+        self._step_rx_parser(s, nxt, 'j1_',
+                             self.rx_levels[n] if n < len(self.rx_levels) else 1)
+        self._step_rx_parser(s, nxt, 'pc_',
+                             self.rx_levels_pc[n]
+                             if n < len(self.rx_levels_pc) else 1)
 
         # ---- override latch (OLD cmd_*_set, OLD sw_c*, live sw) ----
         nxt['sw_c0'] = self.sw & 7
@@ -431,6 +574,8 @@ class System(object):
         nxt['auto_tgl'] = s['auto_tgl']
         nxt['img_tgl'] = s['img_tgl']
         nxt['img_sel_lat'] = s['img_sel_lat']
+        nxt['spd_tgl'] = s['spd_tgl']
+        nxt['speed_lat'] = s['speed_lat']
         if s['cmd_next_pulse']:
             nxt['next_tgl'] = 1 - s['next_tgl']
         if s['cmd_auto_pulse']:
@@ -438,6 +583,9 @@ class System(object):
         if s['cmd_img_sel_set']:
             nxt['img_sel_lat'] = s['cmd_img_sel']
             nxt['img_tgl'] = 1 - s['img_tgl']
+        if s['cmd_speed_set']:
+            nxt['speed_lat'] = s['cmd_speed']
+            nxt['spd_tgl'] = 1 - s['spd_tgl']
 
         # ---- brightness merge (OLD strobes, live key3) ----
         bright_n = s['brightness']
@@ -451,29 +599,40 @@ class System(object):
         s.update(nxt)
         self.key3_press = 0     # consume the one-shot
 
-        # ---- record effects from the committed values ----
-        if nxt['rx_valid']:
-            self.log['rx'].append(nxt['rx_byte'])
-        if nxt['cmd_next_pulse']:
+        # ---- refresh the merged wires from the NEW Q, then log off them.
+        #      The consumers above read merge(Q-before-edge), which is exactly
+        #      what the RTL's always blocks see; this second pass is what an
+        #      observer attached to the wires would measure right now. With
+        #      traffic on J1 alone it reproduces the values the single-port
+        #      model logged straight out of nxt -- that equivalence is the
+        #      regression gate for splitting the instance in two.
+        s.update(self._merge(s))
+        if nxt['j1_rx_valid']:
+            self.log['rx'].append(nxt['j1_rx_byte'])
+        if nxt['pc_rx_valid']:
+            self.log['rx_pc'].append(nxt['pc_rx_byte'])
+        if s['cmd_next_pulse']:
             self.log['next'] += 1
-        if nxt['cmd_auto_pulse']:
+        if s['cmd_auto_pulse']:
             self.log['auto'] += 1
-        if nxt['cmd_bright_cycle_pulse']:
+        if s['cmd_bright_cycle_pulse']:
             self.log['bright_cycle'] += 1
-        if nxt['cmd_bright_set_v']:
-            self.log['bright_set'].append(nxt['cmd_bright_set'])
-        if nxt['cmd_mode_set']:
-            self.log['mode_set'].append(nxt['cmd_mode'])
-        if nxt['cmd_marquee_set']:
-            self.log['marquee_set'].append(nxt['cmd_marquee'])
-        if nxt['cmd_img_sel_set']:
-            self.log['img_set'].append(nxt['cmd_img_sel'])
-        if nxt['cmd_filt_set']:
-            self.log['filt_set'].append(nxt['cmd_filt'])
-        if nxt['cmd_font_set']:
-            self.log['font_set'].append(nxt['cmd_font'])
-        if nxt['cmd_audio_set']:
-            self.log['audio_set'].append(nxt['cmd_audio'])
+        if s['cmd_bright_set_v']:
+            self.log['bright_set'].append(s['cmd_bright_set'])
+        if s['cmd_mode_set']:
+            self.log['mode_set'].append(s['cmd_mode'])
+        if s['cmd_marquee_set']:
+            self.log['marquee_set'].append(s['cmd_marquee'])
+        if s['cmd_img_sel_set']:
+            self.log['img_set'].append(s['cmd_img_sel'])
+        if s['cmd_filt_set']:
+            self.log['filt_set'].append(s['cmd_filt'])
+        if s['cmd_font_set']:
+            self.log['font_set'].append(s['cmd_font'])
+        if s['cmd_audio_set']:
+            self.log['audio_set'].append(s['cmd_audio'])
+        if s['cmd_speed_set']:
+            self.log['speed_set'].append(s['cmd_speed'])
 
     def _do_sd(self):
         s = self.st
@@ -485,6 +644,9 @@ class System(object):
         if s['img_tgl_s1'] ^ s['img_tgl_s2']:
             self.sdlog['img'] += 1
             self.sdlog['img_vals'].append(s['img_sel_s1'])
+        if s['spd_tgl_s1'] ^ s['spd_tgl_s2']:
+            self.sdlog['speed'] += 1
+            self.sdlog['speed_vals'].append(s['speed_s1'])
         nxt = {
             'next_tgl_s0': s['next_tgl'], 'next_tgl_s1': s['next_tgl_s0'],
             'next_tgl_s2': s['next_tgl_s1'],
@@ -493,6 +655,9 @@ class System(object):
             'img_tgl_s0': s['img_tgl'], 'img_tgl_s1': s['img_tgl_s0'],
             'img_tgl_s2': s['img_tgl_s1'],
             'img_sel_s0': s['img_sel_lat'], 'img_sel_s1': s['img_sel_s0'],
+            'spd_tgl_s0': s['spd_tgl'], 'spd_tgl_s1': s['spd_tgl_s0'],
+            'spd_tgl_s2': s['spd_tgl_s1'],
+            'speed_s0': s['speed_lat'], 'speed_s1': s['speed_s0'],
             'music_en_s0': s['music_en'], 'music_en_s1': s['music_en_s0'],
         }
         s.update(nxt)
@@ -543,18 +708,30 @@ class System(object):
             else:
                 self._do_vid(); self.vid_n += 1
 
-    def send(self, byte_list, cpb=None, extra=120):
-        """Push a frame onto the wire and run enough cycles to fully drain it."""
+    def send(self, byte_list, cpb=None, extra=120, port='j1'):
+        """
+        Push a frame onto one command wire and run enough cycles to fully
+        drain it.
+
+        port selects which uart_screen_ctrl instance sees the bytes: 'j1'
+        (D14, the serial screen) or 'pc' (F12, the Type-C CH340). It defaults to
+        'j1' so every pass written before the second source existed keeps
+        driving exactly the port it drove then.
+        """
         if cpb is None:
             cpb = self.cpb
-        # rx_levels is indexed by absolute clk cycle. If settle()/a prior frame
-        # already advanced clk_n past the end of the wire, pad with idle-high so
-        # the new frame's start bit lands exactly on the next clk edge -- else
-        # the RX FSM would sample the middle of the wave and miss it.
-        while len(self.rx_levels) < self.clk_n:
-            self.rx_levels.append(1)
-        self.rx_levels.extend(build_rx_wave(byte_list, cpb))
-        self.run_clk(len(self.rx_levels) + extra)
+        levels = self.rx_levels if port == 'j1' else self.rx_levels_pc
+        # The level vectors are indexed by absolute clk cycle. If settle()/a
+        # prior frame already advanced clk_n past the end of this wire, pad with
+        # idle-high so the new frame's start bit lands exactly on the next clk
+        # edge -- else the RX FSM would sample the middle of the wave and miss
+        # it. Both ports must be padded: an index past the end of a short vector
+        # reads idle-high, but only if it is not the one being extended.
+        for wire in (self.rx_levels, self.rx_levels_pc):
+            while len(wire) < self.clk_n:
+                wire.append(1)
+        levels.extend(build_rx_wave(byte_list, cpb))
+        self.run_clk(max(len(self.rx_levels), len(self.rx_levels_pc)) + extra)
 
     def settle(self, cycles=40):
         """Run idle clk cycles (line stays high) to let CDC chains resolve."""
@@ -642,6 +819,12 @@ def pass_b(res, verbose):
         value_cases.append(("MODE %s" % HEX_DIGITS[n], 'mode_set', [n]))
     for n in range(16):
         value_cases.append(("FILT %s" % HEX_DIGITS[n], 'filt_set', [n]))
+    # SPED spans 1..8 seconds. 1 is the retreat (bit-identical to the shipped
+    # fixed 1 s carousel, because sec_target_m1 == 0 makes sec_last constantly
+    # true) and 8 is the inclusive upper bound, so a mis-set guard bound shows
+    # up at either end rather than only in the middle of the range.
+    for d in SPEED_DIGITS:
+        value_cases.append(("SPED %s" % d, 'speed_set', [ord(d) - 0x30]))
     value_cases += [
         ("FONT 0", 'font_set', [0]),
         ("FONT 1", 'font_set', [1]),
@@ -674,6 +857,12 @@ def pass_b(res, verbose):
         ("MUSC", 'audio_set', "no argument -> clen==4 rejected"),
         ("MUSCX 1", 'audio_set', "five-char keyword -> clen==7 rejected"),
         ("MUSC 11", 'audio_set', "two-digit arg -> clen==7 rejected"),
+        ("SPED 0", 'speed_set', "0 s rejected: shorter than the 0.83 s band ramp"),
+        ("SPED 9", 'speed_set', "digit >8 rejected"),
+        ("SPED", 'speed_set', "no argument -> clen==4 rejected"),
+        ("SPED 11", 'speed_set', "two-digit arg -> clen==7 rejected"),
+        ("SPEDX 1", 'speed_set', "five-char keyword -> clen==7 rejected"),
+        ("sped 1", 'speed_set', "lowercase keyword rejected"),
     ]
     for cmd, key, why in guard_cases:
         s = System()
@@ -736,13 +925,34 @@ def pass_c(res, verbose):
             "IMGX 1/3/4 -> sd img_vals [0,2,3]",
             "count=%d vals=%s" % (s.sdlog['img'], s.sdlog['img_vals']))
 
+    # SPED crosses on its own data+toggle pair, the same primitive IMGX uses:
+    # the value is latched in the clk domain BEFORE the toggle flips, so it is
+    # stable for at least two sd_card_clk edges by the time the edge arrives.
+    s = System()
+    for cmd, sec in (("SPED 2", 2), ("SPED 5", 5), ("SPED 8", 8)):
+        s.send(frame(cmd))
+    res.add(s.sdlog['speed'] == 3 and s.sdlog['speed_vals'] == [2, 5, 8],
+            "SPED 2/5/8 -> sd speed_vals [2,5,8]",
+            "count=%d vals=%s" % (s.sdlog['speed'], s.sdlog['speed_vals']))
+
     # a command must never leak a pulse onto a different channel
     s = System()
     s.send(frame("MODE 2"))
     s.settle()
-    res.add(s.sdlog['next'] == 0 and s.sdlog['auto'] == 0 and s.sdlog['img'] == 0,
+    res.add(s.sdlog['next'] == 0 and s.sdlog['auto'] == 0 and s.sdlog['img'] == 0
+            and s.sdlog['speed'] == 0,
             "MODE leaks no sd pulse",
-            "next=%d auto=%d img=%d" % (s.sdlog['next'], s.sdlog['auto'], s.sdlog['img']))
+            "next=%d auto=%d img=%d speed=%d"
+            % (s.sdlog['next'], s.sdlog['auto'], s.sdlog['img'], s.sdlog['speed']))
+
+    s = System()
+    s.send(frame("SPED 4"))
+    s.settle()
+    res.add(s.sdlog['next'] == 0 and s.sdlog['auto'] == 0 and s.sdlog['img'] == 0
+            and s.sdlog['speed'] == 1,
+            "SPED leaks no next/auto/img pulse",
+            "next=%d auto=%d img=%d speed=%d"
+            % (s.sdlog['next'], s.sdlog['auto'], s.sdlog['img'], s.sdlog['speed']))
     if verbose:
         print("      img_vals:", s.sdlog['img_vals'])
 
@@ -976,7 +1186,7 @@ def pass_e(res, verbose):
              + len(s.log['bright_set']) + len(s.log['mode_set'])
              + len(s.log['marquee_set']) + len(s.log['img_set'])
              + len(s.log['filt_set']) + len(s.log['font_set'])
-             + len(s.log['audio_set']))
+             + len(s.log['audio_set']) + len(s.log['speed_set']))
     res.add(total == 0, "unknown keyword ZZZZ -> nothing",
             "total effects=%d" % total)
 
@@ -1015,13 +1225,31 @@ def pass_e(res, verbose):
         s.frame_boundary()
     spur = (s.log['next'] + s.log['auto'] + s.log['bright_cycle']
             + s.sdlog['next'] + s.sdlog['auto'] + s.sdlog['img']
+            + s.sdlog['speed']
             + len(s.log['filt_set']) + len(s.log['font_set'])
-            + len(s.log['audio_set']))
+            + len(s.log['audio_set']) + len(s.log['speed_set']))
     res.add(ok_track, "retreat: trans_mode tracks ~sw with zero traffic",
             " ".join(detail))
     res.add(spur == 0 and s.st['brightness'] == 2,
             "retreat: no spurious pulse, brightness stays at reset 2",
             "spurious=%d brightness=%d" % (spur, s.st['brightness']))
+
+    # The carousel interval retreat. With zero traffic the sd side must already
+    # read AUTO_SEC_DEFAULT, and no speed pulse may ever fire -- so "the screen
+    # is not connected" and "SPED 1" are the same behaviour, and that behaviour
+    # is the shipped fixed 1 s carousel. Checking a second, non-default value of
+    # the parameter is what makes this an assertion about the PARAMETER rather
+    # than a coincidence of the reset value being 1.
+    for dflt in (1, 4):
+        p = System(auto_sec_default=dflt)
+        p.settle(400)
+        for _ in range(4):
+            p.frame_boundary()
+        res.add(p.speed_sd() == dflt and p.sdlog['speed'] == 0
+                and len(p.log['speed_set']) == 0,
+                "retreat: zero traffic -> interval = AUTO_SEC_DEFAULT(%d)" % dflt,
+                "speed_sd=%d sd pulses=%d clk sets=%d"
+                % (p.speed_sd(), p.sdlog['speed'], len(p.log['speed_set'])))
     res.add(s.filt_out() == 0 and s.font_out() == 0,
             "retreat: filt_frame=0 (passthrough), font_frame=0 (flat)",
             "filt_frame=%d font_frame=%d after 4 frame boundaries"
@@ -1104,10 +1332,10 @@ def pass_f(res, verbose):
     s.send(frame("FILT 1") + frame("FILT 2"))
     s.settle(80)
     res.add(len(s.log['rx']) == 18 and s.log['filt_set'] == [1, 2]
-            and s.st['cmd_filt'] == 2,
+            and s.j1('cmd_filt') == 2,
             "back-to-back frames with zero gap both dispatch",
             "rx=%d filt_set=%s cmd_filt=%d" % (len(s.log['rx']),
-            s.log['filt_set'], s.st['cmd_filt']))
+            s.log['filt_set'], s.j1('cmd_filt')))
 
     # a single inter-frame 0x20 shifts the next frame's keyword into c1..c4, so
     # {c0,c1,c2,c3} == " FIL" and it is silently dropped. Dispatch clears clen
@@ -1117,12 +1345,185 @@ def pass_f(res, verbose):
     s.send(frame("FILT 1") + [0x20] + frame("FILT 2") + frame("FILT 3"))
     s.settle(80)
     res.add(len(s.log['rx']) == 28 and s.log['filt_set'] == [1, 3]
-            and s.st['cmd_filt'] == 3,
+            and s.j1('cmd_filt') == 3,
             "inter-frame 0x20 kills exactly the next frame, then self-heals",
             "rx=%d filt_set=%s cmd_filt=%d" % (len(s.log['rx']),
-            s.log['filt_set'], s.st['cmd_filt']))
+            s.log['filt_set'], s.j1('cmd_filt')))
     if verbose:
         print("      link-debug LED checks complete")
+
+
+# ---------------------------------------------------------------------------
+# Pass G -- the Type-C second command source and the single merge point
+# ---------------------------------------------------------------------------
+# top now instantiates uart_screen_ctrl twice and joins the two bundles at one
+# place. Three claims have to be demonstrated rather than argued: the second
+# source is not a second-class citizen (same commands, same downstream
+# effects), the merge cannot invent a command when both ports speak in the same
+# clk cycle, and PC_CMD_ENABLE=0 removes that port without touching the
+# board-verified J1 path.
+G_COMMANDS = [
+    "NEXT", "AUTO", "BRUP", "BRGT 3", "MODE 5", "MARQ 1", "IMGX 2",
+    "FILT 7", "FONT 1", "MUSC 1", "SPED 6",
+]
+
+
+def drive_both(s, j1_bytes, pc_bytes, extra=120):
+    """
+    Load one frame onto each command wire and run, with the two bit streams
+    starting on the SAME clk cycle.
+
+    build_rx_wave is deterministic and both frames here are the same length, so
+    identical byte counts mean identical cycle counts: the two parsers reach the
+    third 0xFF in the same clk edge, which is the collision case the priority
+    mux exists for. Anything less aligned would test a sequencing accident.
+    """
+    s.rx_levels = build_rx_wave(j1_bytes, s.cpb)
+    s.rx_levels_pc = build_rx_wave(pc_bytes, s.cpb)
+    s.run_clk(max(len(s.rx_levels), len(s.rx_levels_pc)) + extra)
+
+
+def snapshot(s):
+    """
+    Everything a command is allowed to change, as one comparable value. Two
+    Systems fed the same frame on different ports must agree on every element,
+    so each check below is an equality proof rather than a list of separately
+    hand-written expectations.
+
+    Deliberately excluded: the per-port received-byte logs and the per-port
+    command registers. Those are the one thing the two ports CANNOT share --
+    which port heard the frame is exactly what differs -- so the checks that
+    care about them assert them explicitly.
+    """
+    return (
+        s.log['next'], s.log['auto'], s.log['bright_cycle'],
+        tuple(s.log['bright_set']), tuple(s.log['mode_set']),
+        tuple(s.log['marquee_set']), tuple(s.log['img_set']),
+        tuple(s.log['filt_set']), tuple(s.log['font_set']),
+        tuple(s.log['audio_set']), tuple(s.log['speed_set']),
+        s.sdlog['next'], s.sdlog['auto'], s.sdlog['img'],
+        tuple(s.sdlog['img_vals']), s.sdlog['speed'],
+        tuple(s.sdlog['speed_vals']),
+        s.trans_mode(), s.marquee_en(), s.filt_out(), s.font_out(),
+        s.audio_sel_v(), s.music_req_sd(), s.speed_sd(),
+        s.st['brightness'],
+    )
+
+
+def driven(cmd, port):
+    """Run one command down one port, across a frame boundary, and snapshot."""
+    s = System()
+    s.send(frame(cmd), port=port)
+    s.settle(60)
+    s.frame_boundary()
+    s.settle(20)
+    return s
+
+
+def pass_g(res, verbose):
+    print("=" * 78)
+    print("G. Type-C second command source (merge point, priority, retreat)")
+    print("=" * 78)
+
+    # ---- G1: every command behaves identically on either port ----
+    for cmd in G_COMMANDS:
+        a = driven(cmd, 'j1')
+        b = driven(cmd, 'pc')
+        # a's PC port and b's J1 port must both be clean, or a shared bug in the
+        # idle instance could make two broken ports look equal.
+        quiet = (len(a.log['rx_pc']) == 0 and len(b.log['rx']) == 0
+                 and a.pc('clen') == 0 and b.j1('clen') == 0
+                 and b.j1('rx_valid') == 0 and a.pc('rx_valid') == 0)
+        heard = (len(a.log['rx']) == len(frame(cmd))
+                 and len(b.log['rx_pc']) == len(frame(cmd)))
+        res.add(snapshot(a) == snapshot(b) and quiet and heard,
+                "PC '%s' == J1 '%s'" % (cmd, cmd),
+                "effects identical, other port silent, %d bytes each"
+                % len(frame(cmd)))
+
+    # ---- G2: same-cycle value collision, J1 wins ----
+    # MODE 1 on J1 and MODE E on PC dispatch on the same clk edge. The strobe may
+    # be OR-ed (one cmd_mode_set either way), the value must not.
+    s = System()
+    drive_both(s, frame("MODE 1"), frame("MODE E"))
+    s.settle(60)
+    s.frame_boundary()
+    res.add(s.log['mode_set'] == [1] and s.st['mode_ovr_val'] == 1
+            and s.trans_mode() == 1,
+            "collision: J1 MODE 1 wins over PC MODE E",
+            "mode_set=%s ovr=%d trans_mode=%d" % (s.log['mode_set'],
+            s.st['mode_ovr_val'], s.trans_mode()))
+    # Both frames really did parse -- otherwise G2 would also pass on a merge that
+    # silently ignored PC. clen only returns to 0 through the dispatch branch.
+    res.add(s.j1('clen') == 0 and s.pc('clen') == 0
+            and s.pc('cmd_mode') == 0xE and s.j1('cmd_mode') == 1,
+            "collision: both ports dispatched, PC's value survives in its own reg",
+            "j1 cmd_mode=%d pc cmd_mode=%X" % (s.j1('cmd_mode'),
+            s.pc('cmd_mode')))
+
+    # ---- G3: same-cycle pulse collision fires once, not twice ----
+    s = System()
+    drive_both(s, frame("NEXT"), frame("NEXT"))
+    s.settle(60)
+    res.add(s.j1('clen') == 0 and s.pc('clen') == 0,
+            "collision: both NEXT frames dispatched",
+            "j1 clen=%d pc clen=%d" % (s.j1('clen'), s.pc('clen')))
+    # Two merged pulses would flip next_tgl twice (back to 0) and the sd domain
+    # would advance the picture twice. One flip is the proof the strobes were
+    # coincident rather than merely both present.
+    res.add(s.log['next'] == 1 and s.sdlog['next'] == 1
+            and s.st['next_tgl'] == 1,
+            "collision: NEXT on both ports advances exactly one picture",
+            "clk next=%d sd next=%d tgl=%d" % (s.log['next'],
+            s.sdlog['next'], s.st['next_tgl']))
+
+    # ---- G4: NEGATIVE CONTROL -- the OR this design replaced ----
+    s = System()
+    s.merge_naive = 1
+    drive_both(s, frame("MODE 1"), frame("MODE E"))
+    s.settle(60)
+    s.frame_boundary()
+    res.add(s.log['mode_set'] == [0xF] and s.trans_mode() == 0xF,
+            "NEGATIVE CONTROL: OR-ing the value bus invents MODE F",
+            "mode_set=%s trans_mode=%d (neither port sent 0xF)"
+            % ([hex(v) for v in s.log['mode_set']], s.trans_mode()))
+
+    # ---- G5: PC_CMD_ENABLE=0, the one-line retreat ----
+    off = System(pc_cmd_enable=0)
+    for cmd in G_COMMANDS:
+        off.send(frame(cmd), port='pc')
+    off.settle(60)
+    off.frame_boundary()
+    off.settle(20)
+    res.add(snapshot(off) == snapshot(System()),
+            "retreat: PC_CMD_ENABLE=0 -> every F12 command is a no-op",
+            "state identical to a board that heard nothing at all")
+    # led[3] is the only physical evidence F12 has. Gating it with the same
+    # parameter is what makes the retreat honest in both directions: the light
+    # stays dark because the port is off, not because nothing arrived. The
+    # parity equality below is what distinguishes the two.
+    n_pc_bytes = sum(len(frame(c)) for c in G_COMMANDS)
+    res.add(len(off.log['rx_pc']) == n_pc_bytes
+            and off.pc('dbg_rx_toggle') == n_pc_bytes % 2
+            and off.st['dbg_pc_cmd_toggle'] == 0,
+            "retreat: bytes still reach the pin but led[3] stays dark",
+            "%d bytes counted by the instance, merged tap gated to %d"
+            % (len(off.log['rx_pc']), off.st['dbg_pc_cmd_toggle']))
+    res.add(off.j1('dbg_rx_toggle') == 0,
+            "retreat: J1's LEDs unaffected by the parameter",
+            "j1 byte toggle still %d with zero J1 traffic" % off.j1('dbg_rx_toggle'))
+    # the retreat must be one-sided: the verified port still works with PC off
+    live = System(pc_cmd_enable=0)
+    live.send(frame("MUSC 1"))
+    live.send(frame("MODE 3"))
+    live.settle(60)
+    live.frame_boundary()
+    res.add(live.audio_sel_v() == 1 and live.trans_mode() == 3
+            and live.log['mode_set'] == [3],
+            "retreat: J1 still commands the board with PC_CMD_ENABLE=0",
+            "audio=%d trans_mode=%d" % (live.audio_sel_v(), live.trans_mode()))
+    if verbose:
+        print("      dual-source checks complete")
 
 
 def main():
@@ -1136,6 +1537,7 @@ def main():
     pass_d(res, args.verbose)
     pass_e(res, args.verbose)
     pass_f(res, args.verbose)
+    pass_g(res, args.verbose)
     print("=" * 78)
     total = len(res.rows)
     print("%d/%d checks passed, %d failed" % (total - res.failed, total, res.failed))

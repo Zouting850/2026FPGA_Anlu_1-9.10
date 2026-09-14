@@ -1,0 +1,32 @@
+{
+  "generator": "tools/render_arch_png.py",
+  "source": "README.md",
+  "browser": "chrome.exe",
+  "note": "generated - do not hand edit; regenerate with python tools/render_arch_png.py",
+  "figures": [
+    {
+      "file": "arch_fig1.png",
+      "width": 3218,
+      "height": 1235,
+      "sha256_mmd": "c1b169ac18b663ded2fdf928f3255658add989cbc6d158bba2fcba0f120bdf07"
+    },
+    {
+      "file": "arch_fig2.png",
+      "width": 3110,
+      "height": 1934,
+      "sha256_mmd": "f85a1c1d82909642b0f6c866453a0b9c6698f4a9daca1759c4cca1f8f25f27b4"
+    },
+    {
+      "file": "arch_fig3.png",
+      "width": 3009,
+      "height": 4916,
+      "sha256_mmd": "6e02de044ec47c2960db595e16cf9c90743e73f1eb78cde8cc66f56f05f4b01f"
+    },
+    {
+      "file": "arch_fig4.png",
+      "width": 4264,
+      "height": 1261,
+      "sha256_mmd": "22c39c0ed24707ac0566d14c68961ab87edb96a5cfb4884db9b9e463d2d672bd"
+    }
+  ]
+}

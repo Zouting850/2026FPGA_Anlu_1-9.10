@@ -17,3 +17,9 @@ __pycache__/
 # rendered previews are not.
 tools/*.log
 tools/card_preview/
+
+# PyInstaller output for the PC subtitle exe. tools/pc_subtitle.py and
+# tools/build_pc_subtitle_exe.ps1 are tracked; the .exe and intermediates are
+# regenerated from them, so they are not committed.
+tools/build/
+tools/dist/

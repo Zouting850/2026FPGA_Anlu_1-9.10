@@ -117,6 +117,60 @@ set_max_delay -from [get_clocks {ext_mem_clk_sft}] -to [get_clocks {ext_mem_clk}
 #    反向 sd_card_clk -> ext_mem_clk 已干净，不加约束。
 # ------------------------------------------------------------
 set_max_delay -from [get_clocks {ext_mem_clk}] -to [get_clocks {sd_card_clk}] -datapath_only 100
+# ------------------------------------------------------------
+# 5.7 video_clk -> ext_mem_clk 跨域例外
+#
+#    触发这一节的实测（2026-09-13 23:57→00:01 那次 -Stage all，phy_1）：该时钟对
+#    在 final_timing.rpt 里报 9 端点 / 9 条路径，榜首 -0.191 ns
+#      u_video_transition/O_effect_reg[1] -> frame_fifo_read_m0/frame_fifo_read_m0/effect_d0_reg[2].mi[0]
+#    DPD 9.619 ns 中 cell 只占 1.513 ns（15%）、net 占 8.106 ns（85%），逻辑 3 级
+#    且全是工具自插的 LUT1 缓冲（判据见 README 第 10 节：跨域路径 Logic Level 里的
+#    LUT1 要先查 RTL 是不是裸赋值，而不是改 RTL），最大扇出 2。
+#
+#    为什么这不是 RTL 能还的债：同一个端点寄存器的另一半 .mi[1] 是 +2.392 ns，
+#    而这条路径的 cell 延迟 1.513 ns 与之前三个版本逐位相同，四版之间变的只有 net
+#    （7.657 → 6.278 → 5.182 → 8.106 ns）。这一档松紧完全由「这一版工具把这条 2
+#    扇出线排到哪条走线上」决定，与第 10 节「#slices 不给功能记账」是同一条规律的两侧。
+#
+#    被本节约束的 9 条路径逐条核对过（名单取自加约束之后的
+#    HDMI1.4b_Transmitter_v1.0_exception.timing，不取自 final_timing.rpt——加了
+#    set_max_delay 之后这 9 条不再出现在时钟对分组里）：
+#      5 条落在 frame_fifo_read 两级同步器的第一拍：effect_d0_reg[3] /
+#        read_addr_index_d0_reg[1] / read_addr_index_top_d0_reg[0] 两颗 /
+#        read_req_d0_reg_syn_4（SD/frame_fifo_read.v:269-279 全是裸赋值）；
+#      4 条终点写着 sd_card_bmp_m0/bmp_read_m0/sel19_syn_* 与 sel20_syn_*——
+#        bmp_read 整个在 sd_card_clk 域，而这几颗的捕获时钟是 ext_mem_clk，
+#        所以那是 u_video_transition 扇出树被复制之后挂到别人层级名下的 mux 选择脚
+#        （README 第 10 节「物理单元名 ≠ 逻辑归属」），不是 TF 卡模块里的逻辑。
+#    起点侧只有两颗：u_video_transition 的 O_effect / O_top_idx / O_bot_idx 与
+#    video_timing_data_m0/read_req，全是每帧才变一次的准静态码——源在 video_clk 里
+#    稳定 16.80 ms ≈ 210 万个 ext_mem_clk 周期。
+#
+#    这个方向还另外承载 9 条 FIFO 灰码指针路径，它们**没有**被本节放松：报告里
+#    本节的行是 Total 18 / Dominated 9 / Shadowed 9 / Ignored 0，那 9 条 Shadowed
+#    写明是被 IP 自带的
+#      set_max_delay -from [get_regs {*/primary_addr_gray_reg[*]}] -to [get_regs {*/sync_r1[*]}]
+#    盖住的，也就是仍按 7.700 / 9.700 ns 检查。Ignored 为 0 是本节没写错的唯一证据。
+#
+#    因此这里放松的是「第一拍必须在下一个 8 ns 捕获沿之前定住」这条对同步器本来
+#    就不成立的预算，代价只是 MTBF。第二拍 effect_d1 采 effect_d0 仍是 ext_mem_clk
+#    域内完整的 8 ns 检查，不受本节约束影响；min 侧（removal / hold）本节目不涉及。
+#    反向 ext_mem_clk -> video_clk 实测 +4.217 ns 干净，不加约束。
+#
+#    限值取 20 ns 而不是 5.5 / 5.6 的 100 ns：那两节针对的是加密硬核内部、fabric
+#    与 PHY 之间没有用户逻辑的边界，本节这条是用户自己的同步器网。20 ns 既是实测
+#    最差 DPD 9.619 ns 的两倍以上（不是触发即炸的临界值），又远低于 video_clk 的
+#    40 ns 周期，保留了一条真实义务——将来这条网要是被排到 20 ns 以上，报告会重新
+#    违例而不是被本节静默放过。写法仍是 IPUG012 §5 推荐的 -datapath_only 放松，
+#    不用 set_false_path / set_clock_groups，避免冲掉 IP 自带约束。
+#
+#    生效后的实测（2026-09-14 10:39→10:43，TD GUI 完整流程）：本节这一组
+#    SWNS +16.278 ns（9 端点 / 9 条，最松一条 +19.205），全局 Setup WNS +0.409 ns、
+#    违例端点 0，Hold WNS +0.004 ns、违例端点 0，8145 slices / 83.11%。
+#    **一句话诚实话**：本节"是否必要"只在 00:01 那一次布局抽签上被证实过，10:43
+#    这一版没有做拆掉例外的反事实重跑，所以不能宣称"没有本节这一版也会违例"。
+# ------------------------------------------------------------
+set_max_delay -from [get_clocks {video_clk}] -to [get_clocks {ext_mem_clk}] -datapath_only 20
 
 # ------------------------------------------------------------
 # 6. 【禁止启用】下面这组异步分组必须永久保持注释状态

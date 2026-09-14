@@ -21,20 +21,46 @@ module sd_card_bmp #(
     // single picture that never commits cost the music as well. Retreat switch
     // only; the sector arbiter below works either way, because with 0 the two
     // consumers go back to being strictly time-disjoint.
-    parameter         AUDIO_START_ON_FIRST_IMAGE = 1'b1
+    parameter         AUDIO_START_ON_FIRST_IMAGE = 1'b1,
+    // Per-image audio (contest extension 2). 1: the scan's WAV directory entries
+    // fill a 4-slot table and track N plays under picture N. 0: only slot 0 is
+    // ever captured or selected, so the design collapses back to today's
+    // single-track loop and the 192 registers holding slots 1..3 constant-fold
+    // away. Retreat switch only -- nothing below depends on which is set.
+    parameter         AUDIO_MULTI_TRACK   = 1'b1,
+    // Which track the auto carousel holds. The carousel deliberately does NOT
+    // follow the picture: one unchanging track over a rotating slideshow is the
+    // requested behaviour, and a track that restarted every interval would never
+    // get past its first seconds.
+    parameter [1:0]   AUTO_TRACK_IDX      = 2'd0,
+    // 1 makes the auto carousel follow img_idx like a manual switch does, i.e.
+    // per-image music in both modes. Retreat/alternative-behaviour switch; the
+    // shipped value is 0.
+    parameter         AUDIO_FOLLOW_IN_AUTO = 1'b0,
+    // Carousel interval out of reset, in whole seconds. The top level hands down
+    // its own AUTO_SEC_DEFAULT so the clk-domain latch and this counter agree
+    // before any SPED command arrives. It lands in sec_target_m1 as target-1 so
+    // the per-tick comparison stays a plain register equality -- see sec_last.
+    parameter [2:0]   AUTO_SEC_DEFAULT  = 3'd1
 )(
     input                       clk,
     input                       rst,
     input                       key_next,
     input                       key_auto,
     // Serial-screen commands, already crossed into this sd_card_clk domain by
-    // the top level (toggle-CDC for the pulses, data+toggle for cmd_img_sel), so
-    // this module stays single-clock. The two pulses OR into the debounced key
-    // conditions below; cmd_img_sel directly selects an already-loaded picture.
+    // the top level (toggle-CDC for the pulses, data+toggle for cmd_img_sel and
+    // cmd_speed), so this module stays single-clock. The two pulses OR into the
+    // debounced key conditions below; cmd_img_sel directly selects an
+    // already-loaded picture; cmd_speed is the carousel interval in whole
+    // seconds, held between pulses and latched on cmd_speed_pulse.
+    // uart_screen_ctrl already rejects everything outside 1..8, so the range is
+    // not re-checked here -- one place owns the protocol.
     input                       cmd_next_pulse,
     input                       cmd_auto_pulse,
     input       [1:0]           cmd_img_sel,
     input                       cmd_img_sel_pulse,
+    input       [3:0]           cmd_speed,
+    input                       cmd_speed_pulse,
     // Audio source select (screen command MUSC), already 2FF synchronised into
     // this domain by the top level like everything else above. 1 = play the
     // TF-card WAV, 0 = the built-in test tone owns the audio output and this
@@ -142,6 +168,10 @@ wire             aud_sec_data_valid;
 wire             aud_sec_read_end;
 wire             aud_dbg_ever_we;
 wire             aud_dbg_fault;
+// Retire acknowledgement from sd_audio_stream: high only in its S_IDLE, which is
+// the one state that holds no granted sector. The track table rewrite below waits
+// on it, so a switch can never retarget a sector that is already in flight.
+wire             aud_stream_idle;
 wire             bmp_data_wr_en;
 wire [23:0]      bmp_data;
 wire [15:0]      bmp_src_width;
@@ -170,6 +200,11 @@ reg              scan_kicked;
 reg              first_image_committed;
 reg              auto_play_en;
 reg [31:0]       auto_cnt;
+// Carousel interval, in whole seconds, as a count of auto_tick pulses. Three
+// bits is the whole 1..8 range and nothing more: sec_target_m1 holds target-1
+// (0..7) and sec_cnt counts up to it.
+reg [2:0]        sec_cnt;
+reg [2:0]        sec_target_m1;
 reg [2:0]        img_found_count;
 reg [2:0]        img_loaded_count;
 reg [2:0]        next_load_idx;
@@ -187,12 +222,35 @@ reg [31:0]       load_stall_cnt;
 reg              load_abort;
 reg [2:0]        load_retry_cnt;
 
-// WAV directory entry captured during the scan, and the sticky enable that
-// starts sd_audio_stream. It no longer hands over the whole SD port: the arbiter
-// below shares it sector by sector, so this is purely "the track may play now".
-reg              wav_found;
+// WAV directory entries captured during the scan, in physical directory order,
+// plus the live pair sd_audio_stream actually reads. Slot N is track N and pairs
+// with picture N, which is the whole of contest extension 2: bmp_read emits one
+// scan_found_wav_valid pulse per WAV and this counts them exactly the way the
+// block above counts scan_found_valid into img_sector0..3.
+//
+// The live wav_sector/wav_size pair is a registered copy of one slot, never a
+// combinational mux into the streamer. It may only be rewritten while the
+// streamer reports stream_idle, because that is the one state that is not holding
+// a granted sector and will not read wav_start_sector until start rises again.
+reg [31:0]       wav_sector0;
+reg [31:0]       wav_sector1;
+reg [31:0]       wav_sector2;
+reg [31:0]       wav_sector3;
+reg [31:0]       wav_size0;
+reg [31:0]       wav_size1;
+reg [31:0]       wav_size2;
+reg [31:0]       wav_size3;
+reg [2:0]        wav_found_count;
 reg [31:0]       wav_sector;
 reg [31:0]       wav_size;
+// Clamped track selection, the slot the live pair currently holds, and the
+// in-flight switch flag. track_pending is what drops the streamer's start; see
+// the handshake block below for why the switch is a retire-and-rearm rather than
+// an in-place retarget.
+reg [1:0]        track_req_r;
+reg [1:0]        track_cur;
+reg              track_pending;
+wire             wav_found;
 reg              audio_phase;
 // One-hot ownership of the SD sector-read port for the sector in flight. See the
 // arbiter block below for why these are one-hot rather than a grant flag plus a
@@ -206,6 +264,7 @@ reg [2:0]        wrfin_tgl_sync;
 wire             write_finish_pulse;
 
 wire auto_tick;
+wire sec_last;
 wire [1:0] next_from_loaded;
 wire       source_done_now;
 wire       write_done_now;
@@ -231,6 +290,29 @@ wire audio_start_now = music_req &&
                        ? first_image_committed
                        : (bmp_ready && !load_busy &&
                           (img_loaded_count >= SCAN_TARGET_COUNT)));
+
+assign wav_found = (wav_found_count != 3'd0);
+
+// Track selection. A manual switch follows the picture; the auto carousel holds
+// one track instead, because a track that restarted on every interval would
+// never get past its opening seconds. AUDIO_FOLLOW_IN_AUTO makes both modes
+// per-image; AUDIO_MULTI_TRACK=0 collapses everything onto slot 0 and restores
+// the single-track loop.
+//
+// The clamp matters. A card with two tracks and four pictures would otherwise
+// read an empty slot for pictures 3 and 4 -- sector 0, size 0 -- which is a
+// silent S_FAULT rather than a visible error. Falling back to track 0 keeps
+// music playing on every picture whatever the card holds.
+wire [1:0] track_req_raw = AUDIO_MULTI_TRACK
+                         ? ((AUDIO_FOLLOW_IN_AUTO || !auto_play_en)
+                            ? img_idx : AUTO_TRACK_IDX)
+                         : 2'd0;
+wire [1:0] track_req_lim = ({1'b0, track_req_raw} < wav_found_count)
+                         ? track_req_raw : 2'd0;
+// The streamer's arm level. track_pending holds it low for the whole switch,
+// which is what retires sd_audio_stream to S_IDLE at its next sector boundary so
+// the table can be rewritten.
+wire       aud_start     = audio_phase && !track_pending;
 
 // ---------------------------------------------------------------------------
 // SD sector-read port arbiter.
@@ -296,6 +378,15 @@ assign dbg_fail         = {dbg_stall_seen, dbg_hdr_seen, load_retry_cnt[1:0]};
 assign dbg_found_cnt    = {1'b0, img_found_count};
 assign dbg_next_idx     = {1'b0, next_load_idx};
 assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
+// auto_tick still fires once per second exactly as it always has; sec_last says
+// whether the interval has elapsed. The picture changes on the AND of the two.
+// This is deliberately a second parallel counter and NOT a variable compare
+// folded into auto_tick: sd_card_clk is the tightest of the four domains, and
+// putting a 32-bit magnitude compare against a value that comes from another
+// clock domain on that path would spend slack that does not exist. Two 3-bit
+// registers meet at a single AND instead, and storing target-1 when SPED
+// arrives keeps the subtractor off this path as well.
+assign sec_last   = (sec_cnt == sec_target_m1);
 assign next_from_loaded = next_index_limited(img_idx, img_loaded_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
 assign source_done_now = source_done_seen | (load_busy && bmp_ready);
@@ -369,6 +460,36 @@ function [31:0] sector_lut;
     end
 endfunction
 
+// Same shape as sector_lut above, which is the point: a registered 4-way select
+// reading four registers, already proven to meet timing in this domain on the
+// picture side. Registering the result into wav_sector/wav_size keeps the mux off
+// the streamer's arm path entirely.
+function [31:0] wav_sector_lut;
+    input [1:0] idx;
+    begin
+        case (idx)
+            2'd0: wav_sector_lut = wav_sector0;
+            2'd1: wav_sector_lut = wav_sector1;
+            2'd2: wav_sector_lut = wav_sector2;
+            2'd3: wav_sector_lut = wav_sector3;
+            default: wav_sector_lut = wav_sector0;
+        endcase
+    end
+endfunction
+
+function [31:0] wav_size_lut;
+    input [1:0] idx;
+    begin
+        case (idx)
+            2'd0: wav_size_lut = wav_size0;
+            2'd1: wav_size_lut = wav_size1;
+            2'd2: wav_size_lut = wav_size2;
+            2'd3: wav_size_lut = wav_size3;
+            default: wav_size_lut = wav_size0;
+        endcase
+    end
+endfunction
+
 always @(posedge clk or posedge rst) begin
     if (rst) begin
         wrfin_tgl_sync        <= 3'b000;
@@ -381,6 +502,8 @@ always @(posedge clk or posedge rst) begin
         first_image_committed <= 1'b0;
         auto_play_en          <= 1'b0;
         auto_cnt              <= 32'd0;
+        sec_cnt               <= 3'd0;
+        sec_target_m1         <= AUTO_SEC_DEFAULT - 3'd1;
         img_found_count       <= 3'd0;
         img_loaded_count      <= 3'd0;
         next_load_idx         <= 3'd0;
@@ -400,9 +523,20 @@ always @(posedge clk or posedge rst) begin
         load_abort            <= 1'b0;
         load_retry_cnt        <= 3'd0;
         display_valid         <= 1'b0;
-        wav_found             <= 1'b0;
+        wav_sector0           <= 32'd0;
+        wav_sector1           <= 32'd0;
+        wav_sector2           <= 32'd0;
+        wav_sector3           <= 32'd0;
+        wav_size0             <= 32'd0;
+        wav_size1             <= 32'd0;
+        wav_size2             <= 32'd0;
+        wav_size3             <= 32'd0;
+        wav_found_count       <= 3'd0;
         wav_sector            <= 32'd0;
         wav_size              <= 32'd0;
+        track_req_r           <= 2'd0;
+        track_cur             <= 2'd0;
+        track_pending         <= 1'b0;
         audio_phase           <= 1'b0;
         dbg_stall_seen        <= 1'b0;
         dbg_hdr_seen          <= 1'b0;
@@ -417,6 +551,10 @@ always @(posedge clk or posedge rst) begin
             first_image_committed <= 1'b0;
             auto_play_en          <= 1'b0;
             auto_cnt              <= 32'd0;
+            // sec_cnt is elapsed time, so it restarts with auto_cnt.
+            // sec_target_m1 is configuration and is deliberately left alone: a
+            // card re-init should not forget the interval the operator chose.
+            sec_cnt               <= 3'd0;
             img_found_count       <= 3'd0;
             img_loaded_count      <= 3'd0;
             next_load_idx         <= 3'd0;
@@ -438,9 +576,20 @@ always @(posedge clk or posedge rst) begin
             display_valid         <= 1'b0;
             scan_raw_only         <= 1'b0;
             raw_fallback_started  <= 1'b0;
-            wav_found             <= 1'b0;
+            wav_sector0           <= 32'd0;
+            wav_sector1           <= 32'd0;
+            wav_sector2           <= 32'd0;
+            wav_sector3           <= 32'd0;
+            wav_size0             <= 32'd0;
+            wav_size1             <= 32'd0;
+            wav_size2             <= 32'd0;
+            wav_size3             <= 32'd0;
+            wav_found_count       <= 3'd0;
             wav_sector            <= 32'd0;
             wav_size              <= 32'd0;
+            track_req_r           <= 2'd0;
+            track_cur             <= 2'd0;
+            track_pending         <= 1'b0;
             audio_phase           <= 1'b0;
             dbg_stall_seen        <= 1'b0;
             dbg_hdr_seen          <= 1'b0;
@@ -458,12 +607,35 @@ always @(posedge clk or posedge rst) begin
                     img_found_count <= img_found_count + 3'd1;
             end
 
-            // Capture the WAV directory entry (sector + byte size) the first
-            // time the scan reports it. bmp_read only ever emits this once.
-            if (scan_found_wav_valid) begin
-                wav_found  <= 1'b1;
-                wav_sector <= scan_found_wav_sector;
-                wav_size   <= scan_found_wav_size;
+            // Fill the track table in physical directory order, exactly the way
+            // the scan_found_valid block above fills img_sector0..3 -- bmp_read
+            // now emits one pulse per WAV instead of latching only the first.
+            // The AUDIO_MULTI_TRACK term stops the capture at slot 0 when
+            // cleared, which is what constant-folds slots 1..3 away for the
+            // retreat rather than leaving them allocated and unused.
+            if (scan_found_wav_valid &&
+                (AUDIO_MULTI_TRACK || (wav_found_count == 3'd0))) begin
+                case (wav_found_count)
+                    3'd0: begin
+                        wav_sector0 <= scan_found_wav_sector;
+                        wav_size0   <= scan_found_wav_size;
+                    end
+                    3'd1: begin
+                        wav_sector1 <= scan_found_wav_sector;
+                        wav_size1   <= scan_found_wav_size;
+                    end
+                    3'd2: begin
+                        wav_sector2 <= scan_found_wav_sector;
+                        wav_size2   <= scan_found_wav_size;
+                    end
+                    default: begin
+                        wav_sector3 <= scan_found_wav_sector;
+                        wav_size3   <= scan_found_wav_size;
+                    end
+                endcase
+
+                if (wav_found_count < 3'd4)
+                    wav_found_count <= wav_found_count + 3'd1;
             end
 
             // Arm the music streamer. Under AUDIO_START_ON_FIRST_IMAGE this is
@@ -482,6 +654,55 @@ always @(posedge clk or posedge rst) begin
                 audio_phase <= 1'b1;
             else if (audio_phase && !music_req)
                 audio_phase <= 1'b0;
+
+            // ---- per-image track switch ------------------------------------
+            //
+            // A switch is a retire-and-rearm, never an in-place retarget. start
+            // falls, the streamer retires to S_IDLE at the end of the sector in
+            // flight, stream_idle comes back, and only then does the live pair
+            // take the new slot's values. That is the exact path MUSC 0 already
+            // uses and tools/sim_audio_stream.py already proves: a granted
+            // sector always runs to its end pulse, the arbiter always gets its
+            // release, and the abandoned tail (at most 128 words, 2.67 ms) drains
+            // unheard. Retargeting wav_start_sector mid-sector instead would
+            // have no such proof, and the failure mode is silent frame
+            // misalignment rather than anything observable.
+            //
+            // track_req_r is a register purely for timing. It gives the 3-bit
+            // clamp compare its own pipeline stage so wav_sector_lut reads a
+            // register, making that path register -> 4:1 mux -> register -- the
+            // same shape as sector_lut feeding load_sector on the picture side,
+            // in the domain with the least slack in the design.
+            //
+            // Rewriting the live pair while !audio_phase is safe even though the
+            // streamer may still be retiring through S_READ: its rewind branch
+            // is an else-if after `if (!start)`, so with start low it goes to
+            // S_IDLE and never reads wav_start_sector, and pcm_total/wav_usable
+            // are only sampled in S_IDLE.
+            track_req_r <= track_req_lim;
+
+            if (!audio_phase) begin
+                // Follow the selection freely. This is also what loads slot 0
+                // ahead of the very first arm, so no separate initialisation
+                // exists to get out of step with the scan. track_pending is
+                // cleared here on purpose: left set, it would survive into the
+                // next arm and hold start low forever, which is a deadlock with
+                // nothing to indicate it.
+                wav_sector    <= wav_sector_lut(track_req_r);
+                wav_size      <= wav_size_lut(track_req_r);
+                track_cur     <= track_req_r;
+                track_pending <= 1'b0;
+            end else if (!track_pending && (track_req_r != track_cur)) begin
+                track_pending <= 1'b1;
+            end else if (track_pending && aud_stream_idle) begin
+                // Taking track_req_r here rather than a snapshot from when
+                // pending was raised means a second switch arriving mid-retire
+                // lands on the newest selection instead of the stale one.
+                wav_sector    <= wav_sector_lut(track_req_r);
+                wav_size      <= wav_size_lut(track_req_r);
+                track_cur     <= track_req_r;
+                track_pending <= 1'b0;
+            end
 
             if (load_busy && bmp_ready)
                 source_done_seen <= 1'b1;
@@ -545,6 +766,7 @@ always @(posedge clk or posedge rst) begin
                 first_image_committed <= 1'b0;
                 auto_play_en          <= 1'b0;
                 auto_cnt              <= 32'd0;
+                sec_cnt               <= 3'd0;
                 img_found_count       <= 3'd0;
                 img_loaded_count      <= 3'd0;
                 next_load_idx         <= 3'd0;
@@ -563,27 +785,43 @@ always @(posedge clk or posedge rst) begin
                 scan_raw_only         <= 1'b0;
                 raw_fallback_started  <= 1'b0;
             end else begin
+                // Every site below that clears auto_cnt also clears sec_cnt.
+                // They are one event -- "the carousel timing restarts here" --
+                // and clearing only one of the two hands the next interval a
+                // part-elapsed second, so that picture comes up early once and
+                // nothing in a steady-state rotation would ever show it.
                 if ((key_auto_press || cmd_auto_pulse) && first_image_committed && (img_found_count > 3'd1)) begin
                     auto_play_en <= ~auto_play_en;
                     auto_cnt     <= 32'd0;
+                    sec_cnt      <= 3'd0;
                 end
 
+                // auto_cnt stays the one-second tick generator and restarts on
+                // every tick regardless of the interval; sec_cnt counts those
+                // ticks. Only the AND of the two moves the picture.
                 if (auto_play_en && first_image_committed && (img_loaded_count > 3'd1)) begin
                     if (auto_tick) begin
-                        auto_cnt     <= 32'd0;
-                        img_idx      <= next_from_loaded;
-                        disp_buf_idx <= next_from_loaded;
+                        auto_cnt <= 32'd0;
+                        if (sec_last) begin
+                            sec_cnt      <= 3'd0;
+                            img_idx      <= next_from_loaded;
+                            disp_buf_idx <= next_from_loaded;
+                        end else begin
+                            sec_cnt <= sec_cnt + 3'd1;
+                        end
                     end else begin
                         auto_cnt <= auto_cnt + 32'd1;
                     end
                 end else begin
                     auto_cnt <= 32'd0;
+                    sec_cnt  <= 3'd0;
                 end
 
                 if ((key_next_press || cmd_next_pulse) && first_image_committed && (img_loaded_count > 3'd1)) begin
                     img_idx      <= next_from_loaded;
                     disp_buf_idx <= next_from_loaded;
                     auto_cnt     <= 32'd0;
+                    sec_cnt      <= 3'd0;
                 end
 
                 if (cmd_img_sel_pulse && first_image_committed &&
@@ -591,11 +829,31 @@ always @(posedge clk or posedge rst) begin
                     img_idx      <= cmd_img_sel;
                     disp_buf_idx <= cmd_img_sel;
                     auto_cnt     <= 32'd0;
+                    sec_cnt      <= 3'd0;
+                end
+
+                // SPED: store the interval as target-1 so sec_last stays a
+                // register equality. Not gated on first_image_committed -- this
+                // is configuration, not a picture action, and dropping one that
+                // arrives during the initial scan would lose it silently on a
+                // screen that never reads back.
+                if (cmd_speed_pulse) begin
+                    sec_target_m1 <= cmd_speed[2:0] - 3'd1;
+                    sec_cnt       <= 3'd0;
                 end
 
                 if (scan_done && bmp_ready && !load_busy &&
                     !scan_raw_only && !raw_fallback_started && !first_image_committed &&
                     (next_load_idx >= img_found_count)) begin
+                    // The picture table is cleared and rebuilt because the raw
+                    // fallback rescan repopulates it. The WAV track table is
+                    // deliberately NOT cleared here, and the asymmetry is not an
+                    // oversight: ST_SCAN_RAW is a raw sector sweep looking for
+                    // BMP headers and never walks the directory again, so it
+                    // emits no scan_found_wav_valid pulses at all. Clearing
+                    // wav_found_count on this path would drop wav_found for good
+                    // and silence the audio on any card that ever needed the
+                    // fallback, with nothing on screen to say why.
                     scan_start_pulse     <= 1'b1;
                     scan_raw_only        <= 1'b1;
                     raw_fallback_started <= 1'b1;
@@ -624,6 +882,7 @@ always @(posedge clk or posedge rst) begin
                     write_done_seen  <= 1'b0;
                     load_stall_cnt   <= 32'd0;
                     auto_cnt         <= 32'd0;
+                    sec_cnt          <= 3'd0;
                 end
             end
         end
@@ -713,18 +972,19 @@ always @(posedge clk or posedge rst) begin
 end
 
 // Music streamer. Shares the SD sector-read port with bmp_read through the
-// arbiter above, one sector at a time; start is the sticky audio_phase level,
-// which under AUDIO_START_ON_FIRST_IMAGE rises with the first picture rather
-// than after the last, and then loops the single track forever. Its FIFO write
-// side is routed straight out to the top level, where the async FIFO crosses
-// into video_clk.
+// arbiter above, one sector at a time. start is audio_phase gated by the track
+// switch handshake, so it rises with the first picture under
+// AUDIO_START_ON_FIRST_IMAGE, loops the selected track, and drops for at most one
+// sector whenever the picture changes and a different track belongs to it. Its
+// FIFO write side is routed straight out to the top level, where the async FIFO
+// crosses into video_clk.
 sd_audio_stream #(
     .HDR_LEN                (44),
     .PAUSE_THRESH           (9'd256)
 ) sd_audio_stream_m0 (
     .clk                    (clk),
     .rst                    (rst),
-    .start                  (audio_phase),
+    .start                  (aud_start),
     .wav_start_sector       (wav_sector),
     .wav_size               (wav_size),
     .sd_sec_read            (aud_sd_sec_read),
@@ -736,7 +996,8 @@ sd_audio_stream #(
     .fifo_di                (aud_fifo_di),
     .fifo_wrusedw           (aud_fifo_wrusedw),
     .dbg_ever_we            (aud_dbg_ever_we),
-    .dbg_fault              (aud_dbg_fault)
+    .dbg_fault              (aud_dbg_fault),
+    .stream_idle            (aud_stream_idle)
 );
 
 sd_card_top sd_card_top_m0(

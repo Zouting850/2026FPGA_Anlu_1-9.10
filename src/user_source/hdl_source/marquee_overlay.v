@@ -1,19 +1,27 @@
-// Scrolling slogan banner across the vertical middle of the picture.
+// Scrolling slogan banner across the vertical middle of the picture, with an
+// optional PC-text subtitle on the same band.
 //
 // Sits at the very end of the video chain, after osd_overlay, so it can dim
 // whatever is underneath it uniformly. The glyph bitmaps live in the generated
-// marquee_font.vh (tools/gen_marquee_font.py is the golden reference); this
-// file only holds the raster tracker, the scroll counter and the addressing.
+// marquee_font.vh (slogan) and marquee_ascii_font.vh (PC text); the golden
+// references are tools/gen_marquee_font.py and tools/gen_marquee_ascii_font.py.
+// This file only holds the raster tracker, the scroll counter and the addressing.
 //
-// Geometry: 15 glyph cells of 24 px on a 32 px pitch, so cell and column are
-// bit slices of u instead of a division. u = x_pos + marq_pos - H_ACTIVE taken
-// on an 11 bit wire; the single unsigned compare u < TEXT_W covers both the
-// "text has not entered yet" and "text has fully left" cases because the
-// borrow wraps the negative side above TEXT_W.
+// Geometry: glyph cells of 24 px on a 32 px pitch, so cell and column are bit
+// slices of u instead of a division. u = x_pos + marq_pos - H_ACTIVE taken on an
+// 11 bit wire; the single unsigned compare u < text_w covers both the "text has
+// not entered yet" and "text has fully left" cases because the borrow wraps the
+// negative side above text_w.
 //
-// I_3d selects the rendering style: 0 is flat and bit-identical to the design
-// before this port existed, 1 adds a two-step extruded emboss down-right of
-// the glyph face.
+// I_3d selects the slogan rendering style: 0 is flat and bit-identical to the
+// design before this port existed, 1 adds a two-step extruded emboss down-right
+// of the glyph face.
+//
+// I_pc_en selects the source: 0 renders the fixed Chinese slogan exactly as
+// before (every new term collapses to a no-op, so the output is bit-identical to
+// the slogan-only design -- that is the retreat), 1 renders the CDC'd ASCII
+// string from I_pc_char_buf flat (no emboss) over up to I_pc_cells cells. The PC
+// string's text_w / travel_last are runtime values; the slogan's stay constants.
 module marquee_overlay #(
     parameter H_ACTIVE = 640,
     parameter V_ACTIVE = 480
@@ -24,6 +32,11 @@ module marquee_overlay #(
     input  wire [23:0] I_rgb,
     input  wire        I_en,
     input  wire        I_3d,
+    // PC-text subtitle channel. I_pc_en=0 makes every one of these inert and
+    // the whole module bit-identical to the slogan-only design (the retreat).
+    input  wire        I_pc_en,
+    input  wire [5:0]  I_pc_cells,      // live character count, capped at 24
+    input  wire [223:0] I_pc_char_buf,  // 32 x 7-bit ASCII, cell_idx*7 +: 7
     output wire [23:0] O_rgb
 );
 
@@ -41,6 +54,12 @@ localparam BAND_TEXT_Y_LAST = BAND_TEXT_Y + CELL - 1;
 localparam ROW_LSB          = BAND_TEXT_Y % PITCH;
 localparam SCROLL_FRAME_DIV = 2;
 localparam DIM_SHIFT        = 2;
+// Display cap on the PC string. cell_idx = u[9:5] addresses 0..31 and the
+// char_buf is 32 deep, but the 11-bit borrow math s = x_pos + marq_pos peaks at
+// (H_ACTIVE-1) + (H_ACTIVE + n_cells*PITCH - 1); keeping that inside 11 bits
+// forces n_cells <= 24 (32 would peak at 2302 and wrap). The parser enforces the
+// same cap; this saturate is the boundary guard on the CDC'd value.
+localparam [5:0] PC_CELLS_MAX = 6'd24;
 
 localparam [9:0]  H_ACTIVE_W         = H_ACTIVE;
 localparam [9:0]  V_ACTIVE_W         = V_ACTIVE;
@@ -77,6 +96,19 @@ wire [4:0]  gcol;
 wire [4:0]  row;
 wire [23:0] glyph_bits;
 wire        text_on;
+// PC-text arm. band_active / text_w / travel_last collapse to the slogan-only
+// values when I_pc_en=0, which is what keeps the retreat bit-identical.
+wire        band_active;
+wire [10:0] text_w;
+wire [10:0] travel_last;
+wire [5:0]  pc_cells_sat;
+wire [7:0]  char_base;
+wire [6:0]  pc_char;
+wire [3:0]  pc_font_row;
+wire [3:0]  pc_font_col;
+wire [11:0] pc_glyph;
+wire        pc_bit;
+wire        text_on_pc;
 wire        in_e1_rows;
 wire        in_e2_rows;
 wire [10:0] u_e1;
@@ -101,15 +133,21 @@ wire [7:0]  dim_r;
 wire [7:0]  dim_g;
 wire [7:0]  dim_b;
 
-assign in_band = I_en && I_de &&
+assign band_active = I_en || I_pc_en;
+assign in_band = band_active && I_de &&
                  (y_pos >= BAND_Y_W) && (y_pos <= BAND_Y_LAST_W);
 assign band_edge = (y_pos == BAND_Y_W) || (y_pos == BAND_Y_LAST_W);
 assign in_text_rows = (y_pos >= BAND_TEXT_Y_W) && (y_pos <= BAND_TEXT_Y_LAST_W);
 assign frame_wrap = !I_de && de_d && (y_pos == V_ACTIVE_W - 10'd1);
 
+assign pc_cells_sat = (I_pc_cells > PC_CELLS_MAX) ? PC_CELLS_MAX : I_pc_cells;
+assign text_w       = I_pc_en ? {pc_cells_sat, 5'b0} : TEXT_W_P;
+assign travel_last  = I_pc_en ? (H_ACTIVE_P + {pc_cells_sat, 5'b0} - 11'd1)
+                              : TRAVEL_LAST_P;
+
 assign s = {1'b0, x_pos} + marq_pos;
 assign u = s - H_ACTIVE_P;
-assign in_region = (u < TEXT_W_P);
+assign in_region = (u < text_w);
 assign cell_idx = u[9:5];
 assign col      = u[4:0];
 assign col_in_glyph = (col >= GUTTER_W) && (col <= GUTTER_LAST_W);
@@ -118,7 +156,19 @@ assign row  = y_pos[4:0] - ROW_LSB_W;
 
 assign glyph_bits = marquee_glyph(cell_idx[3:0], row);
 assign text_on = in_text_rows && in_region && col_in_glyph &&
-                 glyph_bits[5'd23 - gcol];
+                 glyph_bits[5'd23 - gcol] && !I_pc_en;
+
+// PC-text face: the 12x12 ASCII glyph scaled x2 by the free slices gcol[4:1] /
+// row[4:1], looked up per cell in the CDC'd char_buf. Flat on purpose -- the
+// output mux drops the extrusion arms entirely while I_pc_en is high, so the
+// emboss keeps serving only the slogan.
+assign char_base   = cell_idx * 8'd7;
+assign pc_char     = I_pc_char_buf[char_base +: 7];
+assign pc_font_row = row[4:1];
+assign pc_font_col = gcol[4:1];
+assign pc_glyph    = ascii_glyph(pc_char, pc_font_row);
+assign pc_bit      = pc_glyph[4'd11 - pc_font_col];
+assign text_on_pc  = in_text_rows && in_region && col_in_glyph && pc_bit && I_pc_en;
 
 // Extruded emboss: two progressively darker thickness layers grown down-right
 // from the face. The row gates must be wider than in_text_rows -- today's
@@ -163,6 +213,9 @@ assign dim_g = I_rgb[15:8]  >> DIM_SHIFT;
 assign dim_b = I_rgb[7:0]   >> DIM_SHIFT;
 
 assign O_rgb = !in_band          ? I_rgb :
+               I_pc_en           ? (text_on_pc ? 24'hFFE878 :
+                                    band_edge  ? 24'h60D8FF :
+                                                 {dim_r, dim_g, dim_b}) :
                text_on           ? 24'hFFE878 :
                (I_3d && ext1_on) ? 24'hC0A050 :
                (I_3d && ext2_on) ? 24'h705820 :
@@ -196,7 +249,7 @@ always @(posedge I_clk or posedge I_rst) begin
 
                     if (frame_div == FRAME_DIV_LAST) begin
                         frame_div <= 6'd0;
-                        if (marq_pos == TRAVEL_LAST_P) begin
+                        if (marq_pos == travel_last) begin
                             marq_pos <= 11'd0;
                         end else begin
                             marq_pos <= marq_pos + 11'd1;
@@ -213,5 +266,6 @@ always @(posedge I_clk or posedge I_rst) begin
 end
 
 `include "marquee_font.vh"
+`include "marquee_ascii_font.vh"
 
 endmodule

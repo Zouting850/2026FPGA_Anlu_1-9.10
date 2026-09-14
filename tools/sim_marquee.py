@@ -66,10 +66,12 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
 import gen_marquee_font as gen   # golden band_pixel + the one .vh parser
+import gen_marquee_ascii_font as gena   # golden PC-arm band_pixel_ascii + its .vh parser
 
 HDL = os.path.join(os.path.dirname(TOOLS), "src", "user_source", "hdl_source")
 RTL = os.path.join(HDL, "marquee_overlay.v")
 VH = gen.VH_PATH
+ASCII_VH = gena.VH_PATH
 OSD_RTL = os.path.join(HDL, "osd_overlay.v")
 VIS_RTL = os.path.join(HDL, "audio_visualizer.v")
 
@@ -356,8 +358,39 @@ def parse_ops(code, cfg, widths):
     txt = assign_rhs(code, "u")
     ops["u_sub"] = cfg[match_or_stale(r"s\s*-\s*(\w+)", txt, "u = s - <const>")[1]]
     txt = assign_rhs(code, "in_region")
-    ops["region_lt"] = cfg[match_or_stale(r"\(?\s*u\s*<\s*(\w+)\s*\)?", txt,
-                                          "in_region = u < <const>")[1]]
+    cmp_name = match_or_stale(r"\(?\s*u\s*<\s*(\w+)\s*\)?", txt,
+                              "in_region = u < <name>")[1]
+    if cmp_name in cfg:
+        # Pre-PC design: in_region compared straight against the TEXT_W localparam.
+        ops["region_lt"] = cfg[cmp_name]
+        ops["text_w_runtime"] = False
+    else:
+        # PC design: in_region compares against the runtime wire text_w, which is
+        # I_pc_en ? (pc_cells_sat << shift) : <slogan const>. The slogan arm must
+        # name a localparam so region_lt -- the value every existing pass uses --
+        # is still the constant the banner had before the PC channel existed.
+        ops["text_w_runtime"] = True
+        tw = assign_rhs(code, cmp_name)
+        shift, slogan_w = match_or_stale(
+            r"I_pc_en\s*\?\s*\{\s*pc_cells_sat\s*,\s*(\d+)'b0\s*\}\s*:\s*(\w+)", tw,
+            "text_w = I_pc_en ? {pc_cells_sat, <shift>'b0} : <slogan const>").groups()
+        ops["pc_cells_shift"] = int(shift)
+        ops["region_lt"] = cfg[slogan_w]
+        tl = assign_rhs(code, "travel_last")
+        base, sub, slogan_t = match_or_stale(
+            r"I_pc_en\s*\?\s*\(?\s*(\w+)\s*\+\s*\{\s*pc_cells_sat\s*,\s*\d+'b0\s*\}"
+            r"\s*-\s*11'd(\d+)\s*\)?\s*:\s*(\w+)", tl,
+            "travel_last = I_pc_en ? (<base> + {pc_cells_sat,0} - 11'd<sub>) "
+            ": <slogan const>").groups()
+        ops["travel_base"] = cfg[base]
+        ops["travel_sub"] = int(sub)
+        ops["travel_last_const"] = cfg[slogan_t]
+        # The slogan travel constant must still equal base + TEXT_W - sub, i.e. the
+        # runtime formula has to degenerate to the old TRAVEL_LAST_P at pc_cells=N.
+        if ops["travel_last_const"] != ops["travel_base"] + ops["region_lt"] - ops["travel_sub"]:
+            stale("travel_last's slogan arm %d != base %d + text_w %d - sub %d"
+                  % (ops["travel_last_const"], ops["travel_base"],
+                     ops["region_lt"], ops["travel_sub"]))
 
     txt = assign_rhs(code, "cell_idx")
     ops["cell_slice"] = tuple(int(g) for g in
@@ -406,7 +439,19 @@ def parse_ops(code, cfg, widths):
     ops["index_msb"] = int(const)
 
     txt = assign_rhs(code, "in_band")
-    ops["en_gates_band"] = bool(re.match(r"I_en\s*&&\s*I_de\s*&&", txt))
+    if re.match(r"I_en\s*&&\s*I_de\s*&&", txt):
+        ops["band_gate"] = "I_en"
+        ops["pc_gates_band"] = False
+        ops["en_gates_band"] = True
+    elif re.match(r"band_active\s*&&\s*I_de\s*&&", txt):
+        ba = assign_rhs(code, "band_active")
+        match_or_stale(r"I_en\s*\|\|\s*I_pc_en", ba,
+                       "band_active = I_en || I_pc_en")
+        ops["band_gate"] = "band_active"
+        ops["pc_gates_band"] = True
+        ops["en_gates_band"] = True
+    else:
+        stale("in_band is gated by neither I_en nor band_active: %s" % txt)
     lo_name, hi_name = re.findall(
         r"\(?\s*y_pos\s*>=\s*(\w+)\s*\)?\s*&&\s*\(?\s*y_pos\s*<=\s*(\w+)\s*\)?",
         txt)[0]
@@ -436,21 +481,31 @@ def parse_ops(code, cfg, widths):
     txt = assign_rhs(code, "O_rgb")
     if not txt.startswith("!in_band ? I_rgb"):
         stale("O_rgb must pass I_rgb through outside the band: %s" % txt)
-    # Six arms now: the two emboss layers sit between the face and the band
-    # edge, and both are gated by I_3d. That gate is the whole retreat story --
-    # with I_3d low the mux must collapse to exactly the flat four-arm design.
-    text_hex, ext1_hex, ext2_hex, edge_hex = match_or_stale(
-        r"!in_band \? I_rgb :\s*text_on \? (\d+'h[0-9A-Fa-f]+) :\s*"
+    # The mux now opens with an optional I_pc_en branch (the PC ASCII face, flat,
+    # over the same band edge / dim tail) and then falls through to the six slogan
+    # arms: face > I_3d-gated ext1 > ext2 > edge > dim. Both the I_pc_en branch and
+    # the I_3d gates collapse away in the retreat, so the regex accepts the branch
+    # as optional and still parses the pre-PC design.
+    pc_text_hex, pc_edge_hex, text_hex, ext1_hex, ext2_hex, edge_hex = match_or_stale(
+        r"!in_band \? I_rgb :\s*"
+        r"(?:I_pc_en \? \(text_on_pc \? (\d+'h[0-9A-Fa-f]+) :\s*"
+        r"band_edge \? (\d+'h[0-9A-Fa-f]+) :\s*"
+        r"\{\s*dim_r\s*,\s*dim_g\s*,\s*dim_b\s*\}\) :\s*)?"
+        r"text_on \? (\d+'h[0-9A-Fa-f]+) :\s*"
         r"\(I_3d && ext1_on\) \? (\d+'h[0-9A-Fa-f]+) :\s*"
         r"\(I_3d && ext2_on\) \? (\d+'h[0-9A-Fa-f]+) :\s*"
         r"band_edge \? (\d+'h[0-9A-Fa-f]+) :\s*"
         r"\{\s*dim_r\s*,\s*dim_g\s*,\s*dim_b\s*\}",
-        txt, "the 6-way output mux, face > I_3d-gated ext1 > ext2 > edge").groups()
+        txt, "the output mux, [I_pc_en face >] face > I_3d ext1 > ext2 > edge").groups()
     ops["text_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, text_hex))
     ops["ext1_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, ext1_hex))
     ops["ext2_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, ext2_hex))
     ops["edge_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, edge_hex))
     ops["ext_rgb"] = (ops["ext1_rgb"], ops["ext2_rgb"])
+    ops["has_pc_mux"] = pc_text_hex is not None
+    if ops["has_pc_mux"]:
+        ops["pc_text_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, pc_text_hex))
+        ops["pc_edge_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, pc_edge_hex))
 
     for ch, bits in (("r", "[23:16]"), ("g", "[15:8]"), ("b", "[7:0]")):
         txt = assign_rhs(code, "dim_" + ch)
@@ -462,6 +517,55 @@ def parse_ops(code, cfg, widths):
     # Mux order, which is also the priority order Pass F asserts.
     ops["ext_layers"] = [parse_extrusion(code, cfg, ops, widths, "e1", 1),
                          parse_extrusion(code, cfg, ops, widths, "e2", 2)]
+
+    if ops["has_pc_mux"]:
+        # ---- PC-text arm: every constant lifted from the RTL, nothing restated ----
+        txt = assign_rhs(code, "pc_cells_sat")
+        max_name = match_or_stale(
+            r"\(?\s*I_pc_cells\s*>\s*(\w+)\s*\)?\s*\?\s*(\w+)\s*:\s*I_pc_cells", txt,
+            "pc_cells_sat = (I_pc_cells > <max>) ? <max> : I_pc_cells").group(1)
+        ops["pc_cells_max"] = cfg[max_name]
+
+        txt = assign_rhs(code, "char_base")
+        ops["pc_char_stride"] = int(match_or_stale(
+            r"cell_idx\s*\*\s*8'd(\d+)", txt, "char_base = cell_idx * 8'd<stride>").group(1))
+
+        txt = assign_rhs(code, "pc_char")
+        ops["pc_char_width"] = int(match_or_stale(
+            r"I_pc_char_buf\[\s*char_base\s*\+:\s*(\d+)\s*\]", txt,
+            "pc_char = I_pc_char_buf[char_base +: <width>]").group(1))
+
+        txt = assign_rhs(code, "pc_font_row")
+        ops["pc_font_row_slice"] = tuple(int(g) for g in match_or_stale(
+            r"row\[\s*(\d+)\s*:\s*(\d+)\s*\]", txt, "pc_font_row = row[hi:lo]").groups())
+        txt = assign_rhs(code, "pc_font_col")
+        ops["pc_font_col_slice"] = tuple(int(g) for g in match_or_stale(
+            r"gcol\[\s*(\d+)\s*:\s*(\d+)\s*\]", txt, "pc_font_col = gcol[hi:lo]").groups())
+        # The x2 scale has to be the free [4:1] slices, not a divide: 12x12 -> 24x24.
+        if ops["pc_font_row_slice"] != (4, 1) or ops["pc_font_col_slice"] != (4, 1):
+            stale("the ASCII x2 scale is not the free [4:1] slices: row%s col%s"
+                  % (list(ops["pc_font_row_slice"]), list(ops["pc_font_col_slice"])))
+
+        txt = assign_rhs(code, "pc_glyph")
+        match_or_stale(r"ascii_glyph\(\s*pc_char\s*,\s*pc_font_row\s*\)", txt,
+                       "pc_glyph = ascii_glyph(pc_char, pc_font_row)")
+
+        txt = assign_rhs(code, "pc_bit")
+        ops["pc_glyph_msb"] = int(match_or_stale(
+            r"pc_glyph\[\s*(\d+)'d\s*(\d+)\s*-\s*pc_font_col\s*\]", txt,
+            "pc_bit = pc_glyph[N'd<msb> - pc_font_col]").group(2))
+
+        txt = assign_rhs(code, "text_on_pc")
+        if not re.search(r"&&\s*I_pc_en\s*$", txt):
+            stale("text_on_pc must end with `&& I_pc_en`: %s" % txt)
+        ops["pc_text_on_gated"] = True
+
+        # The slogan face must be gated OFF while the PC string is up, otherwise
+        # both arms would drive the same pixel.
+        txt = assign_rhs(code, "text_on")
+        ops["slogan_off_under_pc"] = bool(re.search(r"&&\s*!I_pc_en\s*$", txt))
+        if not ops["slogan_off_under_pc"]:
+            stale("text_on must end with `&& !I_pc_en`: %s" % txt)
 
     return ops
 
@@ -477,7 +581,7 @@ ALWAYS_FRAGMENTS = (
     "if (y_pos == V_ACTIVE_W - 10'd1)",
     "if (frame_div == FRAME_DIV_LAST)",
     "frame_div <= 6'd0;",
-    "if (marq_pos == TRAVEL_LAST_P)",
+    "if (marq_pos == travel_last)",
     "marq_pos <= 11'd0;",
     "marq_pos <= marq_pos + 11'd1;",
     "frame_div <= frame_div + 6'd1;",
@@ -530,6 +634,36 @@ def load_font(path=VH):
     return table
 
 
+_ASCII_FONT = {}
+
+
+def load_ascii_font(path=ASCII_VH):
+    """Parse marquee_ascii_font.vh into a complete {char_code: {row: bits}} table.
+
+    Same 0-fill discipline as load_font: the emitter folds all-zero rows into the
+    `default` arm, so a parsed char can be missing row keys and the RTL answers
+    12'h000 for those. Bit (gena.CW-1) is the leftmost column, matching the RTL's
+    pc_bit = pc_glyph[4'd11 - pc_font_col]. Cached per path.
+    """
+    if path in _ASCII_FONT:
+        return _ASCII_FONT[path]
+    parsed = gena.parse_vh(read(path))
+    want_codes = [ord(c) for c in gena.CHARSET]
+    if sorted(parsed) != sorted(want_codes):
+        stale("%s holds %d codes, expected the %d printable 0x20..0x7E"
+              % (path, len(parsed), len(want_codes)))
+    table = {}
+    for code in want_codes:
+        rows = parsed[code]
+        outside = sorted(r for r in rows if not 0 <= r < gena.CH)
+        if outside:
+            stale("char 0x%02X of %s indexes rows %s outside 0..%d"
+                  % (code, path, outside, gena.CH - 1))
+        table[code] = {r: rows.get(r, 0) for r in range(gena.CH)}
+    _ASCII_FONT[path] = table
+    return table
+
+
 def parse_panel(path, what):
     """PANEL_Y / PANEL_H of the neighbouring overlays, read from their RTL."""
     code = strip_comments(read(path))
@@ -567,15 +701,20 @@ class Marquee(object):
     control can never accidentally rewrite the logic it is meant to perturb.
     """
 
-    def __init__(self, cfg, widths, ops, font):
+    def __init__(self, cfg, widths, ops, font, ascii_font=None):
         self.cfg = cfg
         self.widths = widths
         self.ops = ops
         self.font = font
+        if ascii_font is None:
+            ascii_font = load_ascii_font() if ops.get("has_pc_mux") else {}
+        self.ascii_font = ascii_font
         self.mask_pos = (1 << widths["marq_pos"]) - 1
         self.mask_xy = (1 << widths["x_pos"]) - 1
         self.mask5 = (1 << widths["gcol"]) - 1
         self.mask_div = (1 << widths["frame_div"]) - 1
+        self.mask_ascii = (1 << gena.CW) - 1
+        self.mask_char = (1 << ops.get("pc_char_width", 7)) - 1
         # knobs
         self.cell_slice = ops["cell_slice"]
         self.col_slice = ops["col_slice"]
@@ -583,6 +722,8 @@ class Marquee(object):
         self.gate_rows = True
         self.en_gates_band = ops["en_gates_band"]
         self.bit_order_reversed = False
+        self.pc_scale_slice = ops.get("pc_font_row_slice", (4, 1))
+        self.pc_drives_band = ops.get("pc_gates_band", False)
         self.frame_div_last = cfg["FRAME_DIV_LAST"]
         self.ext_offsets = [(L["u_off"], L["row_extra"]) for L in ops["ext_layers"]]
         self.ext_needs_i3d = True
@@ -639,20 +780,39 @@ class Marquee(object):
         bits = self.glyph(self._slice(ux, *L["cell_slice"]), row_x)
         return bool((bits >> index) & 1) if index < self.widths["glyph_bits"] else False
 
-    def comb(self, de, rgb, en, i3d=0):
-        """Returns (O_rgb, diagnostics). Pure function of registers + inputs."""
+    def comb(self, de, rgb, en, i3d=0, pc_en=0, pc_cells=0, pc_char_buf=0):
+        """Returns (O_rgb, diagnostics). Pure function of registers + inputs.
+
+        pc_en/pc_cells/pc_char_buf default to 0, which collapses every PC term to
+        a no-op and makes this bit-identical to the slogan-only model. That is the
+        retreat Pass G asserts pixel for pixel.
+        """
         cfg, ops = self.cfg, self.ops
         x, y = self.x_pos, self.y_pos
+        pc_en = bool(pc_en)
 
+        band_active = bool(en) or (pc_en and self.pc_drives_band)
         in_band = bool(de) and ops["band_lo"] <= y <= ops["band_hi"]
         if self.en_gates_band:
-            in_band = in_band and bool(en)
+            in_band = in_band and band_active
         band_edge = y == ops["edge_rows"][0] or y == ops["edge_rows"][1]
         in_text_rows = ops["text_rows"][0] <= y <= ops["text_rows"][1]
         frame_wrap = (not de) and bool(self.de_d) and y == ops["frame_wrap_y"]
 
-        s, u, in_region, cell, col, col_in_glyph, gcol = self.addressing(
+        s, u, _in_region_slogan, cell, col, col_in_glyph, gcol = self.addressing(
             x, self.marq_pos)
+
+        # Runtime text width. The PC string is pc_cells_sat cells wide; the slogan
+        # is the parsed constant. At pc_en=0 text_w == region_lt, so in_region is
+        # exactly the value the slogan-only model computed.
+        if pc_en:
+            pc_cells_sat = min(pc_cells, ops["pc_cells_max"])
+            text_w = pc_cells_sat << ops["pc_cells_shift"]
+        else:
+            pc_cells_sat = 0
+            text_w = ops["region_lt"]
+        in_region = u < text_w
+
         row = (self._slice(y, *ops["row_slice"]) - self.row_sub) & self.mask5
 
         if self.bit_order_reversed:
@@ -663,9 +823,24 @@ class Marquee(object):
         # An out-of-range bit select synthesises to 0; col_in_glyph masks it
         # anyway, but modelling it keeps the diagnostics honest.
         text_bit = (bits >> index) & 1 if index < self.widths["glyph_bits"] else 0
-        text_on = in_region and col_in_glyph and bool(text_bit)
+        # The slogan face carries `&& !I_pc_en`: it is gated off while the PC
+        # string is up, so the two arms never drive the same pixel.
+        text_on = in_region and col_in_glyph and bool(text_bit) and not pc_en
         if self.gate_rows:
             text_on = text_on and in_text_rows
+
+        # ---- PC ASCII face: a 12x12 glyph scaled x2 by the free [4:1] slices ----
+        text_on_pc = False
+        pc_char = pc_glyph = pc_bit = 0
+        if pc_en:
+            char_base = cell * ops["pc_char_stride"]
+            pc_char = (pc_char_buf >> char_base) & self.mask_char
+            pc_font_row = self._slice(row, *self.pc_scale_slice)
+            pc_font_col = self._slice(gcol, *self.pc_scale_slice)
+            pc_glyph = self.ascii_font.get(pc_char, {}).get(pc_font_row, 0) & self.mask_ascii
+            pidx = ops["pc_glyph_msb"] - pc_font_col
+            pc_bit = (pc_glyph >> pidx) & 1 if 0 <= pidx < gena.CW else 0
+            text_on_pc = in_region and col_in_glyph and bool(pc_bit) and in_text_rows
 
         # The two thickness layers, each a pure diagonal translation of the face:
         # u_eN = u - off on the same 11 bit wire, row_eN = row - off on the same
@@ -692,6 +867,13 @@ class Marquee(object):
 
         if not in_band:
             out = rgb
+        elif pc_en:
+            # PC branch: the flat ASCII face over the same edge/dim tail. The
+            # emboss arms are dropped entirely -- 3D belongs to the slogan only.
+            if text_on_pc:
+                out = ops["pc_text_rgb"]
+            else:
+                out = ops["pc_edge_rgb"] if band_edge else dim
         elif text_on:
             out = ops["text_rgb"]
         else:
@@ -710,16 +892,27 @@ class Marquee(object):
                 "col": col, "col_in_glyph": col_in_glyph, "gcol": gcol,
                 "row": row, "bits": bits, "index": index,
                 "text_on": text_on, "dim": dim,
-                "ext1_on": ext1_on, "ext2_on": ext2_on, "emboss": emboss}
+                "ext1_on": ext1_on, "ext2_on": ext2_on, "emboss": emboss,
+                "pc_en": pc_en, "pc_cells_sat": pc_cells_sat, "text_w": text_w,
+                "pc_char": pc_char, "pc_glyph": pc_glyph, "pc_bit": pc_bit,
+                "text_on_pc": text_on_pc}
         return out, diag
 
-    def step(self, de):
+    def step(self, de, pc_en=0, pc_cells=0):
         """The always block. Every next value is computed before any commit."""
-        cfg = self.cfg
+        cfg, ops = self.cfg, self.ops
         x, y, de_d = self.x_pos, self.y_pos, self.de_d
         pos, div = self.marq_pos, self.frame_div
         n_x, n_y, n_pos, n_div = x, y, pos, div
         n_de_d = 1 if de else 0
+
+        # Runtime wrap point: the PC string travels H_ACTIVE + n_cells*PITCH, the
+        # slogan the parsed constant. At pc_en=0 this is cfg["TRAVEL_LAST_P"].
+        if pc_en:
+            cells = min(pc_cells, ops["pc_cells_max"])
+            travel_last = ops["travel_base"] + (cells << ops["pc_cells_shift"]) - ops["travel_sub"]
+        else:
+            travel_last = cfg["TRAVEL_LAST_P"]
 
         if de:
             if not de_d:
@@ -735,7 +928,7 @@ class Marquee(object):
                     n_y = 0
                     if div == self.frame_div_last:
                         n_div = 0
-                        n_pos = 0 if pos == cfg["TRAVEL_LAST_P"] else pos + 1
+                        n_pos = 0 if pos == travel_last else pos + 1
                     else:
                         n_div = div + 1
                 else:
@@ -1221,7 +1414,7 @@ def rgb_int(rgb):
     return (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
 
 
-def capture_band(m, cfg, pos, bg_fn, en=1, i3d=0):
+def capture_band(m, cfg, pos, bg_fn, en=1, i3d=0, pc_en=0, pc_cells=0, pc_char_buf=0):
     """Run BAND_H real lines from the top of the band, capturing every pixel."""
     m.preset(x_pos=0, y_pos=cfg["BAND_Y_W"], de_d=0, marq_pos=pos)
     rows = {}
@@ -1229,10 +1422,11 @@ def capture_band(m, cfg, pos, bg_fn, en=1, i3d=0):
         y = m.y_pos
         row = []
         for x in range(cfg["H_ACTIVE"]):
-            out, diag = m.comb(1, rgb_int(bg_fn(x, y)), en, i3d)
+            out, diag = m.comb(1, rgb_int(bg_fn(x, y)), en, i3d,
+                               pc_en, pc_cells, pc_char_buf)
             row.append((out, diag))
-            m.step(1)
-        m.step(0)                      # falling edge: y_pos advances
+            m.step(1, pc_en, pc_cells)
+        m.step(0, pc_en, pc_cells)        # falling edge: y_pos advances
         rows[y] = row
     return rows
 
@@ -1582,6 +1776,177 @@ def test_pass_f(cfg, widths, ops, font):
                 "y=%d (%d px differ)" % (last, n))
 
 
+def _ascii_char_buf(s):
+    """Pack a string into the flat 224-bit char_buf the RTL port carries (cell*7)."""
+    buf = 0
+    for i, ch in enumerate(s):
+        buf |= (ord(ch) & 0x7F) << (i * 7)
+    return buf
+
+
+def _fill_gena_cache(ascii_font):
+    """Point gena.band_pixel_ascii at the synthesized .vh table, not a fresh render,
+    so the golden reference is exactly the bits the RTL will synthesise."""
+    gena._GLYPH_CACHE = {code: [rows.get(r, 0) for r in range(gena.CH)]
+                         for code, rows in ascii_font.items()}
+
+
+def test_pass_g(cfg, widths, ops, font, ascii_font):
+    print("\n[G] PC-text subtitle arm + the bit-identical retreat")
+
+    if not ops.get("has_pc_mux"):
+        check(False, "G the RTL has no I_pc_en output-mux branch -- Pass G cannot run")
+        return
+
+    # G0: the golden PC reference must describe the same band the RTL synthesises.
+    geo_ok = (gena.BAND_Y == cfg["BAND_Y"] and gena.BAND_H == cfg["BAND_H"]
+              and gena.BAND_TEXT_Y == cfg["BAND_TEXT_Y"] and gena.CELL == cfg["CELL"]
+              and gena.GUTTER == cfg["GUTTER"] and gena.H_ACTIVE == cfg["H_ACTIVE"]
+              and gena.DIM_SHIFT == cfg["DIM_SHIFT"]
+              and gena.POS_BITS == widths["marq_pos"] and gena.CW == 12
+              and rgb_int(gena.TEXT_RGB) == ops["pc_text_rgb"]
+              and rgb_int(gena.EDGE_RGB) == ops["pc_edge_rgb"])
+    check(geo_ok, "G0 gena's golden geometry/colours match the parsed RTL")
+    _fill_gena_cache(ascii_font)
+
+    m = Marquee(cfg, widths, ops, font, ascii_font)
+    white, black = (0xFF, 0xFF, 0xFF), (0, 0, 0)
+    grad = lambda x, y: (x * 255 // 639, y * 255 // 479, (x + y) % 256)
+    backgrounds = (("white", lambda x, y: white), ("black", lambda x, y: black),
+                   ("gradient", grad))
+
+    # ---- G1: the retreat. pc_en=0 must be bit-identical to the slogan golden ----
+    g1_positions = [0, 240, 640, 700, cfg["TRAVEL"] - 1]
+    g1_bad = g1_px = 0
+    for pos in g1_positions:
+        for _bg_name, bg_fn in backgrounds[:2]:
+            rows = capture_band(m, cfg, pos, bg_fn, en=1, i3d=0, pc_en=0)
+            for y in sorted(rows):
+                for x, (out, _d) in enumerate(rows[y]):
+                    g1_px += 1
+                    if out != rgb_int(gen.band_pixel(x, y, pos, bg_fn(x, y), font)):
+                        g1_bad += 1
+    check(g1_bad == 0,
+          "G1 retreat: pc_en=0 reproduces the slogan golden over %d band pixels" % g1_px,
+          "%d pixels differ" % g1_bad)
+
+    # ---- G2: PC arm correctness vs gena.band_pixel_ascii ----
+    strings = ["HELLO FPGA 2026", "A", "abcdefghij", "Mix3d CASE + 99!"]
+    g2_bad = g2_px = 0
+    for s in strings:
+        n = len(s)
+        buf = _ascii_char_buf(s)
+        codes = [ord(c) for c in s]
+        travel_last = cfg["H_ACTIVE"] + n * cfg["PITCH"] - 1
+        for pos in (0, 1, 320, cfg["H_ACTIVE"], travel_last // 2, travel_last):
+            for _bg_name, bg_fn in backgrounds:
+                rows = capture_band(m, cfg, pos, bg_fn, en=0, i3d=0,
+                                    pc_en=1, pc_cells=n, pc_char_buf=buf)
+                for y in sorted(rows):
+                    for x, (out, _d) in enumerate(rows[y]):
+                        g2_px += 1
+                        want = rgb_int(gena.band_pixel_ascii(x, y, pos, bg_fn(x, y), codes, n))
+                        if out != want:
+                            g2_bad += 1
+    check(g2_bad == 0,
+          "G2 pc_en=1 matches gena.band_pixel_ascii over %d pixels (%d strings)"
+          % (g2_px, len(strings)), "%d pixels differ" % g2_bad)
+
+    # ---- G3: the PC arm is observably live, not inert ----
+    s = "HELLO FPGA 2026"
+    buf, n = _ascii_char_buf(s), len(s)
+    rows_pc = capture_band(m, cfg, 700, lambda x, y: black, en=1, i3d=0,
+                           pc_en=1, pc_cells=n, pc_char_buf=buf)
+    rows_sl = capture_band(m, cfg, 700, lambda x, y: black, en=1, i3d=0, pc_en=0)
+    diff_pc = sum(1 for y in rows_pc for x in range(cfg["H_ACTIVE"])
+                  if rows_pc[y][x][0] != rows_sl[y][x][0])
+    check(diff_pc > 0,
+          "G3 pc_en=1 differs from the slogan render (%d px) -- the arm is live" % diff_pc)
+    lit = sum(1 for y in rows_pc for x in range(cfg["H_ACTIVE"])
+              if rows_pc[y][x][0] == ops["pc_text_rgb"])
+    check(lit > 0, "G3 the PC face lights %d px in 24'h%06X" % (lit, ops["pc_text_rgb"]))
+
+    # ---- G4: runtime text_w / travel_last track n_cells, saturate, and wrap ----
+    for nn in (1, 5, 16, 24):
+        m.preset(x_pos=0, y_pos=cfg["BAND_Y_W"], de_d=0, marq_pos=0)
+        _o, d = m.comb(1, 0, 0, 0, pc_en=1, pc_cells=nn, pc_char_buf=0)
+        check(d["text_w"] == (nn << ops["pc_cells_shift"]) and d["pc_cells_sat"] == nn,
+              "G4 n_cells=%d -> text_w=%d, pc_cells_sat=%d"
+              % (nn, d["text_w"], d["pc_cells_sat"]))
+    over = ops["pc_cells_max"] + 6
+    m.preset(x_pos=0, y_pos=cfg["BAND_Y_W"], de_d=0, marq_pos=0)
+    _o, d = m.comb(1, 0, 0, 0, pc_en=1, pc_cells=over, pc_char_buf=0)
+    check(d["pc_cells_sat"] == ops["pc_cells_max"]
+          and d["text_w"] == (ops["pc_cells_max"] << ops["pc_cells_shift"]),
+          "G4 n_cells=%d saturates to the cap %d (text_w=%d)"
+          % (over, d["pc_cells_sat"], d["text_w"]))
+
+    for nn in (1, 24):
+        travel_last = cfg["H_ACTIVE"] + nn * cfg["PITCH"] - 1
+        m.reset()
+        wrapped_from, prev = None, 0
+        bounds = (travel_last + 2) * cfg["SCROLL_FRAME_DIV"] + 4
+        for _ in range(bounds):
+            m.preset(x_pos=0, y_pos=cfg["V_ACTIVE"] - 1, de_d=1,
+                     marq_pos=m.marq_pos, frame_div=m.frame_div)
+            m.step(0, pc_en=1, pc_cells=nn)
+            if m.marq_pos < prev:
+                wrapped_from = prev
+                break
+            prev = m.marq_pos
+        check(wrapped_from == travel_last,
+              "G4 n_cells=%d scroll wraps at travel_last=%d (wrapped from %s)"
+              % (nn, travel_last, wrapped_from))
+
+    # ---- G5: negative controls, each must turn the PC golden comparison red ----
+    s = "HELLO FPGA 2026"
+    n = len(s)
+    buf, codes = _ascii_char_buf(s), [ord(c) for c in s]
+    pos, bg_fn = 700, grad
+
+    def pc_matches(model):
+        rows = capture_band(model, cfg, pos, bg_fn, en=0, i3d=0,
+                            pc_en=1, pc_cells=n, pc_char_buf=buf)
+        for y in sorted(rows):
+            for x, (out, _d) in enumerate(rows[y]):
+                if out != rgb_int(gena.band_pixel_ascii(x, y, pos, bg_fn(x, y), codes, n)):
+                    return False
+        return True
+
+    check(pc_matches(m), "G5 baseline: the unperturbed PC arm matches the golden")
+
+    class _BrokenPcScale(Marquee):
+        def __init__(self, *a, **kw):
+            Marquee.__init__(self, *a, **kw)
+            self.pc_scale_slice = (4, 0)      # no x2 scale: alias every other column
+
+    class _BrokenPcStride(Marquee):
+        def __init__(self, *a, **kw):
+            Marquee.__init__(self, *a, **kw)
+            self.ops = dict(self.ops)
+            self.ops["pc_char_stride"] = 6    # wrong char_buf packing
+
+    class _BrokenPcMsb(Marquee):
+        def __init__(self, *a, **kw):
+            Marquee.__init__(self, *a, **kw)
+            self.ops = dict(self.ops)
+            self.ops["pc_glyph_msb"] = 10     # off-by-one glyph bit order
+
+    class _BrokenPcBand(Marquee):
+        def __init__(self, *a, **kw):
+            Marquee.__init__(self, *a, **kw)
+            self.pc_drives_band = False       # band_active ignores I_pc_en
+
+    expect_fail(pc_matches(_BrokenPcScale(cfg, widths, ops, font, ascii_font)),
+                "G5 a [4:0] font slice (no x2 scale) aliases the glyph")
+    expect_fail(pc_matches(_BrokenPcStride(cfg, widths, ops, font, ascii_font)),
+                "G5 a char stride of 6 (not 7) misreads char_buf")
+    expect_fail(pc_matches(_BrokenPcMsb(cfg, widths, ops, font, ascii_font)),
+                "G5 indexing the glyph at 10-col (not 11-col) shifts it")
+    expect_fail(pc_matches(_BrokenPcBand(cfg, widths, ops, font, ascii_font)),
+                "G5 band_active ignoring I_pc_en blanks the string when en=0")
+
+
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 72)
@@ -1589,6 +1954,7 @@ def main():
     print("=" * 72)
     cfg, widths, ops, raw = parse_rtl()
     font = load_font()
+    ascii_font = load_ascii_font()
     print("parsed from RTL: %d cells of %d px on a %d px pitch, band y %d..%d, "
           "glyph rows y %d..%d, TRAVEL %d, 1 px per %d frames"
           % (cfg["N_CELLS"], cfg["CELL"], cfg["PITCH"], cfg["BAND_Y"],
@@ -1597,11 +1963,18 @@ def main():
     print("font table     : %s (%d cells, %d non-zero rows)"
           % (os.path.basename(VH), len(font),
              sum(1 for c in font.values() for b in c.values() if b)))
+    print("ascii font     : %s (%d codes 0x20..0x7E, %d non-zero rows)"
+          % (os.path.basename(ASCII_VH), len(ascii_font),
+             sum(1 for c in ascii_font.values() for b in c.values() if b)))
     print("output mux     : face 24'h%06X > I_3d ext1 24'h%06X > I_3d ext2 "
           "24'h%06X > edge 24'h%06X > dim"
           % (ops["text_rgb"], ops["ext1_rgb"], ops["ext2_rgb"], ops["edge_rgb"]))
+    print("PC-text arm    : I_pc_en mux, face 24'h%06X > edge 24'h%06X > dim, "
+          "12x12 ASCII glyph x2, cap %d cells"
+          % (ops.get("pc_text_rgb", 0), ops.get("pc_edge_rgb", 0),
+             ops.get("pc_cells_max", 0)))
 
-    m = Marquee(cfg, widths, ops, font)
+    m = Marquee(cfg, widths, ops, font, ascii_font)
 
     test_pass_a(m, cfg)
     test_pass_b(m, cfg)
@@ -1609,6 +1982,7 @@ def main():
     test_pass_d(m, cfg, font)
     test_pass_e(cfg, widths, ops, font)
     test_pass_f(cfg, widths, ops, font)
+    test_pass_g(cfg, widths, ops, font, ascii_font)
 
     print("\n" + "=" * 72)
     if FAILURES:

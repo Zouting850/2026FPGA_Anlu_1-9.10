@@ -14,10 +14,13 @@ module bmp_read(
     output reg [31:0]           scan_found_sector,
     output reg [2:0]            scan_found_total,
 
-    // First WAV file seen during the same directory scan, reported separately
-    // so it never perturbs the BMP count or the early-stop at scan_target_count.
-    // sector = first data sector (LBA), size = full file size in bytes from the
-    // directory entry; the audio streamer derives PCM length as size - 44.
+    // Every WAV file seen during the same directory scan, in physical directory
+    // order, one single-cycle pulse each -- reported separately so it never
+    // perturbs the BMP count or the early-stop at scan_target_count. The
+    // consumer counts the pulses into a table, so pulse N is track N and pairs
+    // with picture N. sector = first data sector (LBA), size = full file size in
+    // bytes from the directory entry; the audio streamer derives PCM length as
+    // size - 44.
     output reg                  scan_found_wav_valid,
     output reg [31:0]           scan_found_wav_sector,
     output reg [31:0]           scan_found_wav_size,
@@ -150,7 +153,6 @@ wire        dir_entry_is_file;
 wire        dir_entry_is_bmp_now;
 wire        dir_ext_is_wav;
 wire        dir_entry_is_wav_now;
-reg         wav_captured;
 wire [31:0] dir_file_sector_now;
 
 assign ready = (state == ST_IDLE);
@@ -594,7 +596,6 @@ always @(posedge clk or posedge rst) begin
         scan_found_wav_valid <= 1'b0;
         scan_found_wav_sector<= 32'd0;
         scan_found_wav_size  <= 32'd0;
-        wav_captured         <= 1'b0;
         scan_sector          <= 32'd0;
         load_sector_latched  <= 32'd0;
         boot_sector_lba      <= 32'd0;
@@ -618,7 +619,6 @@ always @(posedge clk or posedge rst) begin
         scan_found_wav_valid <= 1'b0;
         scan_found_wav_sector<= 32'd0;
         scan_found_wav_size  <= 32'd0;
-        wav_captured         <= 1'b0;
         scan_sector          <= 32'd0;
         load_sector_latched  <= 32'd0;
         boot_sector_lba      <= 32'd0;
@@ -651,7 +651,6 @@ always @(posedge clk or posedge rst) begin
                 if (scan_start) begin
                     scan_done         <= 1'b0;
                     scan_found_total  <= 3'd0;
-                    wav_captured      <= 1'b0;
                     boot_sector_lba   <= scan_start_sector;
                     tried_mbr         <= 1'b0;
                     sd_sec_read_addr  <= scan_start_sector;
@@ -720,16 +719,22 @@ always @(posedge clk or posedge rst) begin
                             sd_sec_read <= 1'b0;
                             state       <= ST_IDLE;
                         end
-                    end else if (dir_entry_is_wav_now && !wav_captured) begin
-                        // Capture only; never counted toward the BMP target and
-                        // never triggers the early-stop, so the image scan/load
-                        // behaviour is bit-for-bit unchanged. Relies on the WAV
-                        // directory entry preceding the 4th BMP (the offline
-                        // sync writes MUSIC.WAV first).
+                    end else if (dir_entry_is_wav_now) begin
+                        // Report EVERY WAV, not just the first. sd_card_bmp counts
+                        // these pulses into wav_sector0..3 the same way it counts
+                        // scan_found_valid into img_sector0..3, which is what makes
+                        // track N belong to picture N. Still an else-if after the
+                        // BMP test, still never counted toward the BMP target and
+                        // still never triggering the early-stop, so the image
+                        // scan/load behaviour is bit-for-bit unchanged. The
+                        // ordering contract widens with it: every WAV must precede
+                        // the 4th BMP in physical directory order, so the offline
+                        // sync writes MUSIC0..3.WAV before any BMP. scan_found_wav_
+                        // valid has a per-cycle default clear above, so one entry
+                        // is exactly one pulse and the count cannot run away.
                         scan_found_wav_valid  <= 1'b1;
                         scan_found_wav_sector <= dir_file_sector_now;
                         scan_found_wav_size   <= dir_file_size_now;
-                        wav_captured          <= 1'b1;
                     end
                 end
 

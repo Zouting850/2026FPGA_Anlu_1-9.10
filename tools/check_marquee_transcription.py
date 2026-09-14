@@ -484,7 +484,10 @@ def check_geometry(src):
 # ---------------------------------------------------------------------------
 CHAIN = [("audio_visualizer", "vout_data_audio"),
          ("osd_overlay", "vout_data_osd"),
-         ("marquee_overlay", "vout_data")]
+         ("marquee_overlay", "vout_data"),
+         # The alarm layer is the last mux of the stack: every overlay below it
+         # stays completely unaware that an emergency mode exists.
+         ("alarm_overlay", "vout_data_alarm")]
 
 
 def check_wiring(src):
@@ -492,9 +495,11 @@ def check_wiring(src):
 
     top = sim.strip_comments(src.top)
     ports = module_ports(src.rtl, "marquee_overlay")
-    check(sorted(ports) == ["I_3d", "I_clk", "I_de", "I_en", "I_rgb", "I_rst",
-                            "O_rgb"],
-          "marquee_overlay declares exactly %s" % sorted(ports),
+    expected_ports = sorted(["I_3d", "I_clk", "I_de", "I_en", "I_rgb", "I_rst",
+                             "O_rgb", "I_pc_en", "I_pc_cells", "I_pc_char_buf"])
+    check(sorted(ports) == expected_ports,
+          "marquee_overlay declares exactly %s (the three I_pc_* ports are "
+          "validated by check_marquee_ascii_transcription.py)" % expected_ports,
           "got %s" % sorted(ports))
     check(ports.get("I_rgb") == ("input", 24) and ports.get("O_rgb") == ("output", 24),
           "I_rgb and O_rgb are 24 bits wide")
@@ -549,10 +554,20 @@ def check_wiring(src):
 
     _p, inst, body = find_instance(top, "video_rgb_to_axis_640x480")
     conn, _ = connections(body)
-    check(inst is not None and conn.get("I_rgb") == "vout_data",
-          "the marquee is the last overlay: vout_data feeds "
-          "video_rgb_to_axis_640x480.I_rgb",
+    last_mod, last_net = CHAIN[-1]
+    check(inst is not None and conn.get("I_rgb") == last_net,
+          "%s is the last overlay: %s feeds "
+          "video_rgb_to_axis_640x480.I_rgb" % (last_mod, last_net),
           "I_rgb is %s" % conn.get("I_rgb"))
+
+    # The retreat must be a wire, not a half-gated layer: at EMERGENCY_ENABLE=0 the
+    # else branch has to alias the alarm net straight through, or the chain above
+    # would end in a net nobody drives.
+    check(re.search(r"assign\s+%s\s*=\s*vout_data\s*;" % re.escape(last_net), top)
+          is not None,
+          "the EMERGENCY_ENABLE=0 branch aliases %s to vout_data, so the retreat "
+          "keeps a four-stage-shaped chain" % last_net,
+          "no `assign %s = vout_data;` found" % last_net)
 
     check(re.search(r"wire\s+\[\s*23\s*:\s*0\s*\]\s+vout_data_osd\s*;", top),
           "vout_data_osd is declared as a 24-bit wire")
@@ -873,12 +888,10 @@ def check_controls(src):
               src.top,
               r"if \(video_frame_start\) begin\n"
               r"            filt_frame <= filt_val_v1;\n"
-              r"            font_frame <= font_val_v1;\n"
-              r"        end",
+              r"            font_frame <= font_val_v1;\n",
               "font_frame <= font_val_v1;\n"
               "        if (video_frame_start) begin\n"
-              "            filt_frame <= filt_val_v1;\n"
-              "        end",
+              "            filt_frame <= filt_val_v1;\n",
               "the frame-atomic latch")),
           "C16 latching font_frame outside `if (video_frame_start)`, so FONT "
           "could change mid-frame and tear the picture")

@@ -53,11 +53,53 @@ set_pin_assignment	{ seg_sel[5] }	{ LOCATION = D11; IOSTANDARD = LVCMOS33; DRIVE
 # 屏幕↔PC 可见正确 hex（屏幕侧全对）、屏幕↔FPGA 不通。
 # 接线：屏幕 4P TTL 的 TX->J1 pin1、RX->J1 pin2、GND->J1 pin12 或 pin30，VCC 悬空。
 # 注意 J1 在 LVCMOS33 bank，不耐 5V，接前先量屏幕 TX 空闲电平；屏幕自行供电。
-# 退路：把下面两行 LOCATION 改回 F12 / D12 即恢复 Type-C 通路，RTL 一行不必动。
+# 退路（已失效，保留备查）：以前这两行 LOCATION 改回 F12 / D12 就能退回 Type-C 通路。
+# 现在 F12 已经被下面新增的 u_uart_pc_cmd 占用，改回去等于两个解析器听同一根线，
+# 必须先删掉那个实例。真要退回串口屏走 Type-C，正解是不再需要命令第二源（即反过来
+# 把 PC_CMD_ENABLE 置 0）后再改这两行。
 set_pin_assignment	{ uart_rx }	{ LOCATION = D14; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment	{ uart_tx }	{ LOCATION = G11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+# Type-C 命令通道（第二路命令源）：F12=uart_pc_rx(入)，板载 CH340 经 Type-C 到 FPGA。
+# 与上面 J1 串口屏没有任何共享信号——独立的脚、独立的一整个 uart_screen_ctrl 实例，
+# 两路只在 top 的唯一合并点汇合（选通 OR、数据按 J1 优先做 mux）。协议与命令字与
+# D14 那一路**逐字节相同**，所以同一份 hex 发哪个口效果一样；区别只在 J1 那一路
+# 优先：两口同拍各发一条时听 J1 的。
+# F12/D12 正是上面串口屏走不通的 CH340/Type-C 通路，但串口屏失败仅因为屏幕本身是
+# USB 从设备（device-to-device 永不枚举）；PC 是 USB host，host-to-device 正常，故
+# PC↔FPGA 经 Type-C 在串口屏 bring-up 阶段已被实测确认「FPGA 侧全对、可控制」。
+# 本脚同时接 top 里的 u_uart_pc_text（PC 文字字幕）：两者靠 PC_TEXT_ENABLE 二选一，
+# 当前为 0 所以字幕实例被 prune，F12 只服务命令解析。两个一起开会两头都坏。
+# 只收不发，所以 D12（FPGA->PC 的 TX）暂不约束，等有回读级再加。
+# 退路：top 的 PC_CMD_ENABLE=0 一行让 Type-C 命令通道整体消失（含数据负载，故综合
+# 真的会删掉该实例），J1 串口屏与拨码完全不受影响。
+set_pin_assignment	{ uart_pc_rx }	{ LOCATION = F12; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+# 应急硬线（两条独立干接点输入）。全部落在 J2：J1 已经给了串口屏的 4P TTL 飞线，
+# 再往上叠会让串口屏的排障和应急链路的排障互相干扰（串口屏那一路是刚验证过的）。
+#   T1 = J2 pin5 = M3  手报按钮（人工触发）   -> MANUAL_TYPE = 2 疏散
+#   T2 = J2 pin6 = M4  烟感/温感干接点（自动） -> AUTO_TYPE   = 1 火警
+# 极性是**低有效**：排针上没有板载上拉，所以用上 FPGA 内部 PULLTYPE=PULLUP 把脚保持在
+# 高，触发器件（按钮/继电器/湿接点）把这条线短到 GND 才算告警。
+# 回路接 J2 pin12 或 pin30（都是 GND）。**绝不能用 pin11**——那是 VCC5V，而这个 Bank 的
+# IO 是 3.3V，手册明确警告 5V 直驱 FPGA IO 会损坏芯片（要 5V 器件得先过电平转换）。
+# 消抖是非对称的：按下这一侧不等待（跟着 3FF 同步电平立即生效，否则 20ms 消抖会把
+# 「≤1 帧换屏」的承诺打成 2 帧），断开这一侧要连续 20ms 采样都为高才解除，且任何一个
+# 有效采样都会重置计时——手碰一下杜邦线、烟感回路继电器抖动，都不该把告警抹掉。
+# 退路：top 的 EMERGENCY_ENABLE=0 让整条应急链路（含这两根的同步与消抖寄存器）综合消失。
+set_pin_assignment	{ emg_in_manual }	{ LOCATION = M3; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+set_pin_assignment	{ emg_in_auto }	{ LOCATION = M4; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+# 板载蜂鸣器（H11，板上网络名 BUZZER/spk）。**无源**：给它一个恒定电平是完全无声的，
+# 必须自行输出方波才响，驱动在 buzzer_beep.v（1 kHz 方波 + 按类型码的亮/停窗口）。
+# SW5 是串在蜂鸣器供电回路上的硬件开关，不占 FPGA 资源——SW5 断开时这套逻辑再正确也
+# 不会响，症状和「功能坏了」一模一样，上板第一件事先确认 SW5。
+# 它的角色是 HDMI 警笛的第二条独立发声通路：电视静音、显示器没选音频输入、HDMI 线被
+# 拔掉，屏幕和这条链路都还在报警。
+set_pin_assignment	{ spk }	{ LOCATION = H11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 # 串口链路诊断 LED（高电平点亮，此前四个 LED 完全未被驱动）
-# led[0]=每收到一个字节翻转 led[1]=最近一个字节是 0xFF led[2]=有一帧被接受并派发 led[3]=恒灭
+# led[0]=J1(D14) 每收到一个字节翻转  led[1]=J1 最近一个字节是 0xFF
+# led[2]=有一帧被解析器派发——两路命令源**未冻结**选通的并集，任一口的帧都算，
+#         告警接管期间普通命令虽被丢弃，这只灯照闪（它就是用来判断链路活着的）
+# led[3]=Type-C(F12) 每收到一个字节翻转（PC_CMD_ENABLE=0 时恒灭，不是坏了）；
+#         PC_TEXT_ENABLE=1 时整位让回字幕通道的同名观测点，两者是二选一
 set_pin_assignment	{ led[0] }	{ LOCATION = A4; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 set_pin_assignment	{ led[1] }	{ LOCATION = A3; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 set_pin_assignment	{ led[2] }	{ LOCATION = C10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
