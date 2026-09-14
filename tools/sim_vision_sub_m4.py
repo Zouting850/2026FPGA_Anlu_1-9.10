@@ -140,13 +140,50 @@ def parse_mean_recip(path=F_AEXP):
     50.564 ns, which single-handedly broke the whole 50 MHz sys_clk domain
     (slack -30.680 ns).  Parsing M and SH here means the model cannot silently
     drift from whatever the RTL actually does.
+
+    The operand is matched loosely as ``frm_sum`` or ``fsum``: the RTL first
+    narrows the frame sum to 25 bits (``fsum = frm_sum[24:0]``, lossless --
+    see parse_aec_hardening) and then multiplies *that*.  Matching either name
+    keeps this parser from breaking on a purely mechanical rename, while
+    MEAN_SHIFT still pins the actual arithmetic.
     """
     code = strip_comments(open(path, "r", encoding="utf-8").read())
-    m = re.search(r"frm_sum\s*\*\s*\d+'d(\d+)", code)
+    m = re.search(r"\b(?:frm_sum|fsum)\s*\*\s*\d+'d(\d+)", code)
     s = re.search(r"mean_m\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]", code)
     if not m or not s:
         raise RuntimeError("display-mean reciprocal not found in %s" % path)
     return int(m.group(1)), int(s.group(2))
+
+
+def parse_aec_hardening(path=F_AEXP):
+    """Parse the two sys_clk path hardenings out of auto_exp.v.
+
+    Both exist purely to close timing on the 50 MHz sys_clk domain, both were
+    forced by measured P&R failures, and both look like removable clutter to
+    anyone who has not seen the reports.  Pin them so that removing either
+    one fails the model instead of quietly re-breaking the domain.
+
+      narrowed : ``fsum = frm_sum[24:0]``.  The frame sum is bounded by
+                 90240*255 = 23,011,200 < 2^25, so this is lossless and takes
+                 7 carry levels out of every compare/subtract on the path.
+      stages   : pipeline registers between frm_sum and pend_data
+                 (``errmag_r`` then ``step_c_r``).  Before they went in the
+                 AEC path was 20.240 ns against a 20 ns budget (slack
+                 -0.520 ns, level 16); with them the sys_clk group reports
+                 SWNS +4.887 ns / 0 violations.
+
+    ``stages`` must stay in step with the frame_tick tap in the tops: each
+    stage pushes frame_tick one more ``mt_dly`` bit (currently mt_dly[5]).
+    """
+    code = strip_comments(open(path, "r", encoding="utf-8").read())
+    narrowed = bool(re.search(r"\bfsum\s*=\s*frm_sum\s*\[\s*24\s*:\s*0\s*\]",
+                              code))
+    stages = 0
+    if re.search(r"\berrmag_r\s*<=\s*errmag\b", code):
+        stages += 1
+    if re.search(r"\bstep_c_r\s*<=\s*step_c\b", code):
+        stages += 1
+    return narrowed, stages
 
 
 D = parse_defines()
@@ -418,6 +455,14 @@ def test_constants():
     check(2 <= UPDATE_DIV <= 15, "UPDATE_DIV is a sane frame spacing")
     check(LINE_LEN == 68 + CURVE_N + 2,
           "line length 164 == 68 header bytes + 94 curve chars + CRLF")
+
+    # sys_clk path hardenings -- both were forced by real P&R failures and
+    # both are easy to delete by accident (see parse_aec_hardening).
+    narrowed, stages = parse_aec_hardening()
+    check(narrowed,
+          "auto_exp narrows frm_sum to 25 bits (lossless, 7 fewer carry levels)")
+    check(stages == 2,
+          "AEC decision chain keeps its 2 pipeline stages (errmag_r/step_c_r)")
     check(REG_SHUT == 0x0B and REG_GAIN == 0x35 and REG_AEC == 0xAF,
           "register addresses are R0x0B / R0x35 / R0xAF")
 

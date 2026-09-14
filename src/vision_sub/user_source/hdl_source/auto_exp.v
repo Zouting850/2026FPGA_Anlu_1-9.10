@@ -89,28 +89,91 @@ reg[15:0] pend_data;
 
 // ------------------------------------------------------------
 // 组合：误差 / 比例步长 / 决策条件
+//
+// 【为什么先把 frm_sum 截到 25 位】
+//   frm_sum 的硬上界 = 90240 x 255 = 23,011,200 < 2^25，高 7 位恒 0
+//   （exp_meter.v 的注释本来就按这个上界写的）。
+//   直接拿 32 位的 frm_sum 去做比较/减法，TD 会老老实实搭 32 位进位链；
+//   截到 25 位**无损**，能砍掉 7 级进位。
+//   注意：errmag 原本就只取 diff[24:0]，即"25 位"这个前提在设计里早就
+//   成立了，这里只是把它提到前面，好让 TD 也能利用它。
+//   常量也一并截成 25 位——否则 Verilog 按"两边取大"规则把比较拉回 32 位，
+//   优化就白做了。
+//   （实测：这一步单独做**不够**，见下面的流水线注释。）
 // ------------------------------------------------------------
+wire[24:0] fsum  = frm_sum[24:0];
+wire[24:0] tgt5  = `EXP_TARGET_SUM;        // 8,663,040 < 2^24
+wire[24:0] dbd5  = `EXP_DEADBAND_SUM;      // 262,144
+wire[24:0] tg_hi = tgt5 + dbd5;            // 8,925,184 < 2^25
+wire[24:0] tg_lo = tgt5 - dbd5;            // 8,400,896
+
 // |sum - TARGET|（无符号幅度，避开有符号减法回绕）
-wire[31:0] diff    = (frm_sum >= `EXP_TARGET_SUM)
-                     ? (frm_sum - `EXP_TARGET_SUM)
-                     : (`EXP_TARGET_SUM - frm_sum);
+wire[24:0] diff    = (fsum >= tgt5)
+                     ? (fsum - tgt5)
+                     : (tgt5 - fsum);
 // 幅值上限：max(90240*255, TARGET) = 23,011,200 < 2^25，25 位足够
-wire[24:0] errmag  = diff[24:0];
+wire[24:0] errmag  = diff;
+
+// ------------------------------------------------------------
+// 【曝光决策流水线：为什么必须在链条中间插寄存器】
+//   整条链原本单拍做完：
+//     fsum -> 比较/减法 -> |err| -> 乘 -> 移位 -> 钳位 -> 边界钳位 -> pend_data
+//   真实布线实测（M5，2026-09-14）它就是 sys_clk 上唯一过不去的路：
+//     snap_sum_reg -> u_aexp/pend_data_reg
+//     Data Path Delay 20.016~20.240ns（预算 20ns）, Logic Level 15~16,
+//     slack -0.296 ~ -0.520ns，且**逐次布局会漂**（哪条最差会变）。
+//   拆开看：MULT18 单级 3.56ns + 进位链 ~3ns + 布线 ~7.4ns。只把 frm_sum
+//   截成 25 位救不了——链条本身太长，必须在中间切断。
+//
+//   切成三段，每段末尾都有寄存器收尾：
+//     段1  fsum -> diff -> errmag_r               （比较 + 减法）
+//     段2  errmag_r -> psh -> raw -> step_c_r      （乘 + 移位 + 钳位）
+//     段3  step_c_r -> dec_amt/inc_amt -> pend_data（边界钳位 + 回写）
+//
+//   【插流水会不会改变功能】不会，两级都不需要动任何语义：
+//     frm_sum 与 exp_shut 在一帧内都是**准静态**的——前者整帧不变，后者
+//     只在回写那一刻变。而事件间隔是整整一帧（16.7ms），远大于 2 个
+//     sys_clk（40ns）。所以多等两拍只是让决策晚 40ns 生效，对闭环收敛
+//     毫无影响。
+//     配套改动：top_vision_m5.v 把 frame_tick 从 mt_dly[3] 挪到 mt_dly[5]，
+//     保证行为状态机在**流水线出结果之后**才取样（那边有对应注释）。
+//     M4/M5 的 Python 模型按"帧"建模（一次 frame() = 一帧），不建这条链的
+//     拍级细节，所以模型与既有断言都不受影响。
+// ------------------------------------------------------------
+reg[24:0] errmag_r;
+
+always@(posedge clk or posedge rst)
+begin
+	if(rst)
+		errmag_r <= 25'd0;
+	else
+		errmag_r <= errmag;
+end
 
 // 比例步长：Δshut = (shut * errmag) >> EXP_PSHIFT（≈ /TARGET，见 vision_def.v）
 // 16 位 x 25 位 = 41 位中间积
-wire[40:0] psh     = exp_shut * errmag;
+wire[40:0] psh     = exp_shut * errmag_r;
 wire[17:0] raw     = psh >> `EXP_PSHIFT;
 
 // 钳位到 [EXP_STEP_MIN, EXP_STEP_MAX]：太小爬不动，太大跳变
 wire[15:0] step_c  = (raw > `EXP_STEP_MAX) ? `EXP_STEP_MAX
                    : ((raw < `EXP_STEP_MIN) ? `EXP_STEP_MIN : raw[15:0]);
 
+reg[15:0] step_c_r;
+
+always@(posedge clk or posedge rst)
+begin
+	if(rst)
+		step_c_r <= 16'd0;
+	else
+		step_c_r <= step_c;
+end
+
 // 单次调整量还要限制"不越过上下限"（否则会算出越界值写进传感器）
-wire[15:0] dec_amt = (step_c > (exp_shut - `EXP_SHUT_MIN))
-                     ? (exp_shut - `EXP_SHUT_MIN) : step_c;
-wire[15:0] inc_amt = (step_c > (`EXP_SHUT_MAX - exp_shut))
-                     ? (`EXP_SHUT_MAX - exp_shut) : step_c;
+wire[15:0] dec_amt = (step_c_r > (exp_shut - `EXP_SHUT_MIN))
+                     ? (exp_shut - `EXP_SHUT_MIN) : step_c_r;
+wire[15:0] inc_amt = (step_c_r > (`EXP_SHUT_MAX - exp_shut))
+                     ? (`EXP_SHUT_MAX - exp_shut) : step_c_r;
 
 wire geom_ok    = (frm_cnt == `CAM_FRAME_PIX);
 // 饱和削顶保护：大量像素贴到 255 时，sum 被削顶压缩、闭环会**低估**亮度
@@ -119,9 +182,8 @@ wire geom_ok    = (frm_cnt == `CAM_FRAME_PIX);
 // 大面积暗部）会提前触发这个保护、整体压暗——这是有意的取舍：对背景
 // 建模来说，"不过曝"比"平均亮度好看"更重要。
 wire sat_alarm  = (frm_sat > `EXP_SAT_MAX);
-wire too_bright = geom_ok && ((frm_sum >  (`EXP_TARGET_SUM + `EXP_DEADBAND_SUM))
-                              || (sat_alarm == 1'b1));
-wire too_dark   = geom_ok && (frm_sum <  (`EXP_TARGET_SUM - `EXP_DEADBAND_SUM));
+wire too_bright = geom_ok && ((fsum > tg_hi) || (sat_alarm == 1'b1));
+wire too_dark   = geom_ok && (fsum < tg_lo);
 wire in_band    = geom_ok && (~too_bright) && (~too_dark);
 wire div_ok     = (div_cnt >= `EXP_UPDATE_DIV);
 
@@ -141,7 +203,7 @@ wire div_ok     = (div_cnt >= `EXP_UPDATE_DIV);
 //     * 再右移 24 位，最大 255.13 -> 255，正好落在 8 位无符号范围内；
 //     * 186 = 128+32+16+8+2，全用移位相加；综合后逻辑级数从 48 降到个位数级。
 //   这是 display-only 字段（只喂状态行的 Y=），0.046% 偏差无任何影响。
-wire[31:0] mean_m = frm_sum * 32'd186;
+wire[31:0] mean_m = fsum * 32'd186;
 wire[7:0]  mean_c = mean_m[31:24];
 
 always@(posedge clk or posedge rst)

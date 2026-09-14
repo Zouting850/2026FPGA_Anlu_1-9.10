@@ -473,17 +473,22 @@ always@(posedge sys_clk)
 
 wire meter_edge = mt_sync[2] ^ mt_sync[1];
 
-reg[3:0] mt_dly;
+reg[5:0] mt_dly;
 always@(posedge sys_clk or posedge rst_sys)
 begin
 	if(rst_sys)
-		mt_dly <= 4'd0;
+		mt_dly <= 6'd0;
 	else
-		mt_dly <= {mt_dly[2:0], meter_edge};
+		mt_dly <= {mt_dly[4:0], meter_edge};
 end
 
 wire exp_ld     = mt_dly[2];           // 抓亮度快照
-assign frame_tick = mt_dly[3];           // 快照稳后再发决策脉冲
+// 决策脉冲必须等曝光决策流水线出结果（auto_exp.v 里 errmag_r / step_c_r 两级）：
+//   快照在 mt_dly[2] 之后一拍可用，再经两段流水线，所以取 mt_dly[5] 而不是
+//   原来的 mt_dly[3]（晚两拍 = 40ns）。一帧 16.7ms，这点延迟无影响；
+//   但**必须**晚这两拍，否则状态机会取到流水线还没算完的值。
+//   详细推导见 auto_exp.v 的"曝光决策流水线"注释。
+assign frame_tick = mt_dly[5];
 
 always@(posedge sys_clk or posedge rst_sys)
 begin

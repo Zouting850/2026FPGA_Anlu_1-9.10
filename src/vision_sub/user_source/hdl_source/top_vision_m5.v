@@ -477,17 +477,23 @@ always@(posedge sys_clk)
 
 wire meter_edge = mt_sync[2] ^ mt_sync[1];
 
-reg[3:0] mt_dly;
+reg[5:0] mt_dly;
 always@(posedge sys_clk or posedge rst_sys)
 begin
 	if(rst_sys)
-		mt_dly <= 4'd0;
+		mt_dly <= 6'd0;
 	else
-		mt_dly <= {mt_dly[2:0], meter_edge};
+		mt_dly <= {mt_dly[4:0], meter_edge};
 end
 
 wire exp_ld     = mt_dly[2];           // 抓亮度快照
-assign frame_tick = mt_dly[3];           // 快照稳后再发决策脉冲（M5 也用它）
+// 决策脉冲必须等曝光决策流水线出结果（auto_exp.v 里 errmag_r / step_c_r 两级）：
+//   mt_dly[2] 抓快照 -> 快照下一拍可用 -> 段1 再 +1 拍 -> 段2 再 +1 拍
+//   -> 段3（边界钳位）组合出 dec_amt/inc_amt，同拍被状态机取样。
+//   所以 frame_tick 取 mt_dly[5]，比原来的 mt_dly[3] 晚两拍（40ns）。
+//   一帧是 16.7ms，晚 40ns 对闭环收敛和行为状态机都没有任何影响；
+//   但**必须**晚这两拍，否则状态机会取到流水线还没算完的值。
+assign frame_tick = mt_dly[5];
 
 always@(posedge sys_clk or posedge rst_sys)
 begin
