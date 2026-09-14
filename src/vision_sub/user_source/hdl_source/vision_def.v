@@ -2,15 +2,16 @@
 // vision_def.v
 // 视觉处理副板（EG4S20 / HX4S20）—— 全局参数定义
 //
-// 本文件与引用它的全部 RTL（top_vision_m1/m2/m3/m4.v、mt9v034_cfg.v、
+// 本文件与引用它的全部 RTL（top_vision_m1/m2/m3/m4/m5.v、mt9v034_cfg.v、
 // sccb_master.v、dvp_capture.v、frame_stat.v、dbg_uart.v、bg_store.v、
 // bg_model.v、m2_engine.v、fg_stat.v、morph.v、projection.v、
-// people_seg.v、exp_meter.v、auto_exp.v）同目录，
+// people_seg.v、exp_meter.v、auto_exp.v、behavior_fsm.v）同目录，
 // `include "vision_def.v" 即可解析，无需在 TD 工程里额外配置包含路径。
 //
 // 参数按里程碑分组：M1（采集/配置/串口）、M2（背景建模）、M3（形态学 +
-// 投影 + 人数）、M4（自动曝光闭环）。同一参数只在一处定义，RTL 与
-// tools/ 下的 Python 验证模型都从本文件解析，避免两边各写一份常数。
+// 投影 + 人数）、M4（自动曝光闭环）、M5（行为状态机 + 置信度）。同一参数
+// 只在一处定义，RTL 与 tools/ 下的 Python 验证模型都从本文件解析，
+// 避免两边各写一份常数。
 // ============================================================
 
 `ifndef VISION_DEF_V
@@ -247,5 +248,145 @@
 `define EXP_SAT_LEVEL     8'd250                 // 饱和像素判定阈值
 `define EXP_SAT_MAX       24'd4096               // 饱和像素数超过此值 → 强制判"偏亮"
 `define M4_LINE_LEN       8'd164                 // M4 状态行长度
+
+// ------------------------------------------------------------
+// M5 行为状态机 + 置信度参数
+//
+// 【职责】M3 只回答"这一帧看起来有几个人"（瞬时值，无时间维度）。
+//   M5 补上时间维度：够不够稳、待了多久、是不是在互动、要不要报离开。
+//   输出"行为状态 + 建议播放模式 + 置信度"，**最终裁决权仍在主板**
+//   （副板不知道媒体清单/播放进度/内容分级，只能给建议）。
+//
+// 【状态机】（方案 v2.0 §2.2）
+//   IDLE ──人数≥1 连续 EVT_CONFIRM 帧──→ PRESENCE
+//   PRESENCE ──停止抖动且稳定 STABLE_FRAMES 帧──→ SINGLE
+//   PRESENCE ──人数≥2 连续 EVT_CONFIRM 帧──→ MULTI
+//   SINGLE/MULTI ──能量突增 且（横向位移 or 大幅突增）──→ INTERACT
+//   INTERACT ──能量回落 或 冷却 COOL_FRAMES 到期──→ 回 SINGLE/MULTI
+//   SINGLE/MULTI ──占用范围触及画面最外 GUARD_EDGE 列 连续确认──→ ALERT
+//   任意(有人态) ──人数 0 持续 LEAVE_FRAMES──→ LEAVE（锁存停留时长）
+//   LEAVE ──人数≥1──→ PRESENCE；LEAVE ──无人再持续 IDLE_HOLD_FRAMES──→ IDLE
+//   ALERT ──离开警戒区 连续确认 且 人数≥1──→ 回 SINGLE/MULTI
+//
+// 【防误触发】方案 §2.2 "防误触发"四条，逐条落到常量：
+//   1) 人数 ±1 死区：差 1 个不认（PPL_DEADBAND），必须同向连续
+//      PPL_CONFIRM 帧才认；差 ≥2 立刻跟（真来了一群人不用等）。
+//      实测边界（M5 模型逐条验证过，别把它的作用想大了）：
+//        - 短于 PPL_CONFIRM 帧的 ±1 突发（如 2 帧）被完全滤掉，
+//          连报告人数 U 都不会动；
+//        - 长于等于 PPL_CONFIRM 帧的持续（如 4 帧）**会被当真**并
+//          照常跃迁到 MULTI——那确实是"画面里真出现了第二个人"，
+//          3 帧 = 50 ms @60fps 就是这条流水线的判定颗粒度；
+//        - 因此 PPL_CONFIRM 与 EVT_CONFIRM 取同一数值（3）时，死区
+//          在"防状态误跃迁"上与状态确认的作用是重叠的，它真正独立
+//          贡献的是：报告人数（U 字段）稳定、以及把未确认的证据挡在
+//          状态机计数器之前。
+//   2) 所有状态跃迁都要连续 EVT_CONFIRM 帧确认（进入/退出用同一门限，
+//      "进入门限 > 退出门限"的滞回体现在：进入要 3 帧，退出走各自的
+//      长确认——LEAVE 要 2 s、SINGLE 要 2 s 稳定，都远长于 3 帧）。
+//   3) 互动带 COOL_FRAMES 冷却，冷却期内不再触发新的互动事件。
+//   4) 质心每帧位移 ≤ CTR_QUIET 箱才算"安静"（PRESENCE→SINGLE 的前提）。
+//
+// 【能量基线与突增】nrg 取形态学后的前景像素数（m_cnt），比形态学前
+//   干净。基线用一阶 EMA：base += (nrg - base) >> NRG_BASE_SHIFT，
+//   **只在非 INTERACT 状态更新**——否则挥手把自己的基线抬上去，
+//   动作结束后基线迟迟降不回来，下一次挥手就检测不到了。
+//   突增判据同时要绝对量和倍数：nrg > base + NRG_INT_DELTA 且
+//   nrg > base + (base >> NRG_INT_RATIO)（后者即 1.5 倍）。
+//   只要绝对量的话，基线高时小动静也误判；只要倍数的话，基线近 0 时
+//   一点点噪声就乘以无穷大。两个都要。
+//
+//   ⚠️ 两处"基线还没收敛"的坑（建模时抓出，属于本里程碑的真实修正）：
+//   1) 上电后 base 初值为 0，若直接 EMA，则观众一出现 nrg 就远大于
+//      base+Δ → 被误判成"突增"。故**第一个有效帧直接把 base 灌成 nrg**
+//      （base_init 标志），之后才走 EMA——与 M2 上电灌背景是同一思路。
+//   2) 即便灌了初值，"无人→有人"或"1 人→2 人"这类人数阶跃本身仍会
+//      让 nrg 跳一大截（真人确实带来了更多前景像素），而 EMA 需要约
+//      NRG_BASE_SHIFT 倍的时间才跟上。若不设防，进入 MULTI 的瞬间就会
+//      误报一次 INTERACT。故引入 warm_cnt：**原始人数一变就清零**，连续
+//      NRG_BASE_READY 帧（≈0.5 s）内不判互动，等基线追上当前场景。
+//      盯"原始人数"而不是滤波后的人数很关键：阶跃的能量跳变是这一帧
+//      就发生的，而滤波后的 pplf 还要 PPL_CONFIRM 帧确认，用 pplf 会让
+//      防护晚 3 帧生效，恰好漏掉阶跃那几帧（M5 模型实测抓到的第二个坑）。
+//      挥手本身不改人数，所以不会把自己的检测窗口重置掉。
+//
+// 【方向判别】滑动窗口（DIR_WIN 帧）里记质心列的 min/max，
+//   跨度 ≥ DIR_MIN 箱算"有横向位移"，方向取窗口首末差符号。
+//   挥手时手臂来回扫，跨度足够；单纯站立抖动跨度很小。
+//   方案原文把互动判据写成一个 AND（能量突增 且 方向成立），实测会
+//   漏掉"前推"（手掌朝镜头推近：能量突增明显但质心几乎不动）。
+//   这里放宽为：能量突增 且（横向位移成立 或 突增幅度 > 2x），
+//   方向编码 3 = 前推。上板可按现场动作收紧 NRG_INT_DELTA。
+//
+// 【置信度】三个 0..255 的评分各自独立积分，合成后除以 3：
+//     sc_dwell  : 有人 +SC_UP，无人 -SC_DN      （待得久 → 可信）
+//     sc_motion : 能量 ≥ NRG_LO +SC_UP，否则 -SC_DN（真的有东西在）
+//     sc_quiet  : 质心安静 +SC_UP，抖动 -SC_DN  （拿得准 → 可信）
+//     conf = (sc_dwell + sc_motion + sc_quiet) * 85 >> 8
+//   85/256 ≈ 1/3.01，用常数乘法代替除法器；三路和最大 765，
+//   乘 85 后 65025 >> 8 = 254，天然不溢出 8 位。三个评分都做饱和，
+//   所以 conf 对"稳定"单调、对"抖动/无人"单调下降，主板可以按
+//   ≥128 采信、<64 忽略之类的阈值用。
+// ------------------------------------------------------------
+// 行为状态编码（3 bit）
+`define ST_IDLE           3'd0
+`define ST_PRESENCE       3'd1
+`define ST_SINGLE         3'd2
+`define ST_MULTI          3'd3
+`define ST_INTERACT       3'd4
+`define ST_LEAVE          3'd5
+`define ST_ALERT          3'd6
+
+// 建议播放模式编码（3 bit，对齐方案 §2.1；STANDBY 含"无人"与"未确认"两类）
+`define MD_STANDBY        3'd0
+`define MD_SINGLE         3'd1
+`define MD_MULTI          3'd2
+`define MD_INTERACT       3'd3
+`define MD_ALERT          3'd4
+
+// 防误触发
+`define PPL_DEADBAND      4'd1        // 人数差 1 个不认（死区）
+`define PPL_CONFIRM       4'd3        // 人数同向变化连续确认帧数
+`define EVT_CONFIRM       3'd3        // 状态/警戒区跃迁连续确认帧数
+`define STABLE_FRAMES     8'd120      // 2 s @60fps：PRESENCE → SINGLE
+`define LEAVE_FRAMES      8'd120      // 2 s：有人态 → LEAVE（人数 0）
+`define IDLE_HOLD_FRAMES  10'd600     // 10 s：LEAVE → IDLE
+                                      // 注意宽度必须 ≥10：9'd600 装不下 600
+                                      // （9 位上限 511），会被静默截成 88 帧≈1.5 s。
+                                      // TD 只给 HDL-5007 WARNING，不报错。
+`define COOL_FRAMES       8'd90       // 1.5 s：互动冷却
+
+// 质心与方向
+`define CTR_QUIET         7'd3        // 质心每帧位移 ≤ 此值（箱）算安静
+`define DIR_WIN           5'd16       // 方向判别窗口（帧）
+`define DIR_MIN           7'd2        // 窗口内质心跨度 ≥ 此值（箱）算有位移
+`define DIR_WIN_MAX       5'd15       // DIR_WIN - 1（窗口计数比较用）
+
+// 能量
+`define NRG_BASE_SHIFT    5'd5        // 能量基线 EMA 移位（1/32）
+`define NRG_BASE_READY    6'd32       // 人数变化后，基线需连续更新这么多帧才允许判互动
+                                      // （否则"来人/变多人"这种能量阶跃会被当成挥手）
+`define NRG_INT_DELTA     17'd1500    // 互动判据：相对基线的绝对增量
+`define NRG_INT_RATIO     2'd1        // 互动判据：> base + (base>>1) 即 1.5 倍
+`define NRG_LO            17'd300     // 有效能量的下限（低于此视为噪声/无人）
+`define NRG_HI            17'd30000   // 有效能量的上限（超出视为满屏噪声）
+
+// 警戒区：占用列范围触及画面最外侧 GUARD_EDGE 列 → 建议 ALERT
+`define GUARD_EDGE        10'd47      // ≈ 376/8
+`define GUARD_R_LEFT      10'd328     // CAM_IMG_W - 1 - GUARD_EDGE = 375 - 47
+
+// 置信度评分步长与合成
+`define SC_UP             8'd2
+`define SC_DN_SOFT        8'd4
+`define SC_DN_HARD        8'd8
+`define CONF_MUL          8'd85       // /256 ≈ /3.01
+`define CONF_SHIFT        4'd8        // 4 位才装得下 8（3'd8 会截成 0）
+
+// 状态行
+`define M5_LINE_LEN       8'd193      // 68(M4 前缀) + 29(M5 新字段) + 94 曲线 + CRLF
+`define M5_CURVE_POS      8'd97       // 曲线起点
+`define M5_CURVE_END      8'd190      // 曲线终点（含）
+`define M5_CR_POS         8'd191
+`define M5_LF_POS         8'd192
 
 `endif

@@ -9,13 +9,17 @@
 - **M1**（SCCB 配置 + DVP 采集 + 帧指纹）把"FPGA 能不能自己把摄像头配起来、能不能正确采到像素"
   这件事**独立闭环**，不依赖主板、不依赖 SDRAM、不依赖任何后续算法。
 - **M2**（背景建模 + 帧差二值化 + 前景统计）把"FPGA 能不能自己把画面里的运动目标抠出来"
-  独立闭环：同样不依赖主板、不依赖 SDRAM（背景帧是 88 KB 的片内 BRAM 单缓冲）。
+  独立闭环：同样不依赖主板、**当时假设不依赖 SDRAM**（背景帧是 88 KB 的片内 BRAM 单缓冲）。
+  ⚠️ 2026-09-14 真实构建证明这个假设不成立——见 §9.5 二次修正与 §11.4。
 - **M3**（形态学开运算 + 行列投影 + 人数分段）把"FPGA 能不能把二值前景整理成可判读的
   投影曲线、并给出一个人数估计"独立闭环：仍然不依赖主板、不依赖 SDRAM——投影直方图用
   寄存器阵列而非 BRAM，整条链仍是**纯流式、单缓冲**。
 - **M4**（自动曝光闭环）把"FPGA 能不能自己把亮度稳在目标值"独立闭环：关掉传感器片上
   AEC/AGC、由 FPGA 回写 R0x0B/R0x35。这一级是 M2/M3 能不能**长期稳定**的前提——
   片上 AEC 随场景微调曝光，整帧灰度集体平移，帧差满屏假前景，背景模型会被反复冲垮。
+- **M5**（行为状态机 + 置信度）把"FPGA 能不能把逐帧的瞬时量读成**行为**"独立闭环：
+  有人来了 / 站定了 / 几个人 / 在互动 / 离开了多久 → `(状态, 建议模式, 置信度)` 三元组。
+  这是副板**第一次给出主板能用的决策依据**（但仍只给建议，裁决权在主板）。
 
 ---
 
@@ -41,9 +45,10 @@ src/vision_sub/
     vision_sub_m2.al           # TD 工程（M2）：顶层 top_vision_m2，含全部 M2 模块
     vision_sub_m3.al           # TD 工程（M3）：顶层 top_vision_m3，含全部 M3 模块
     vision_sub_m4.al           # TD 工程（M4）：顶层 top_vision_m4，含全部 M4 模块
+    vision_sub_m5.al           # TD 工程（M5）：顶层 top_vision_m5，含全部 M5 模块
   user_source/
     hdl_source/
-      vision_def.v             # 全局参数：分辨率/分频/SCCB 寄存器表/M2+M3+M4 阈值
+      vision_def.v             # 全局参数：分辨率/分频/SCCB 寄存器表/M2+M3+M4+M5 阈值
       sccb_master.v            # SCCB(类 I2C) 主机，16 位寄存器读写
       dbg_uart.v               # 115200-8N1 调试串口（复用板载 CH340）
       dvp_capture.v            # PCLK 域 DVP 采集（HREF/VSYNC 边沿）
@@ -65,6 +70,9 @@ src/vision_sub/
       exp_meter.v              # 帧亮度计量（sum/cnt/饱和像素数，PCLK 域）
       auto_exp.v               # 曝光闭环（关片上 AEC → 比例步长回写 R0x0B/R0x35）
       top_vision_m4.v          # M4 顶层（在 M3 基础上加 exp_meter + auto_exp + SCCB 仲裁）
+      ---- 以下为 M5 ----
+      behavior_fsm.v           # M5 行为状态机（7 态 + 人数死区/帧确认/互动冷却/能量基线）
+      top_vision_m5.v          # M5 顶层（在 M4 基础上加 behavior_fsm + 193 字节状态行）
     constraints_source/
       pin.adc                  # 引脚约束（J1 摄像头 / CH340 / LED）
       timing.sdc               # 时钟约束（sys 50 MHz / pclk 74 ns 异步组）
@@ -72,6 +80,10 @@ tools/sim_vision_sub_m1.py     # M1 周期精确模型（无 Verilog 仿真器�
 tools/sim_vision_sub_m2.py     # M2 像素定律 + 逐周期对齐 + 帧级统计模型
 tools/sim_vision_sub_m3.py     # M3 形态学 + 投影 + 人数分段模型（含两处负向对照）
 tools/sim_vision_sub_m4.py     # M4 曝光闭环模型（收敛/无振荡 + n+2 延迟 + 状态行）
+tools/sim_vision_sub_m5.py     # M5 帧级状态机模型（含 sized-literal 位宽审计）
+tools/td_flow_exit.tcl         # 运行目录流的退出包装（DefaultFlow.tcl 没有 exit）
+tools/td_open_only.tcl         # 只打开工程、生成 _Runs/ 与 .prj 快照后退出
+tools/td_make_prj.py           # 从 .al 确定性生成 .prj 快照（见 §6.2 第 7 条）
 doc/vision_sub/README.md        # 本文件
 ```
 
@@ -81,9 +93,14 @@ doc/vision_sub/README.md        # 本文件
 > 变得依赖工程配置，容易变成找不到文件的编译错误。
 
 
-> **为什么顶层不例化 SDRAM/PLL**：M1 只需 50 MHz 板载时钟即可验证"配置 + 采集 + 统计"。
-> 行缓存与 SDRAM 三缓冲帧缓存属 **M1b**（需 TD 的 SDRAM 控制器 IP），M2 之后再接。
+> **为什么 M1 顶层不例化 SDRAM/PLL**：M1 只需 50 MHz 板载时钟即可验证"配置 + 采集 + 统计"。
+> 行缓存与 SDRAM 三缓冲帧缓存属 **M1b**（需 TD 的 SDRAM 控制器 IP）。
 > 这样 M1 的验证不引入 SDRAM 时序变量，出问题时定位面更窄。
+>
+> ⚠️ **2026-09-14 修正**：M2 沿用了"先不用 SDRAM"的思路，把背景帧放进片内 BRAM。
+> 真实构建证明**放不下**（`PHY-9013`，见 §9.5 二次修正与 §11.4）。
+> 结论：**SDRAM 不再是"M1b 以后再说"的可选项，而是 M2 起就必须有的基础设施**。
+> 帧缓存方案定论后，M1 顶层也建议同步引入 `sdram_ctrl.v`，让各里程碑共用同一套存储层。
 
 ---
 
@@ -227,6 +244,38 @@ MH4 K N=016080 F=0000A3 M=00001C P=2 S=068 E=0100 G=010 Y=060 L=1 V=00001122...\
 
 LED 指示：`led[0]` 配置完成、`led[1]` 自检通过、`led[2]` 0.5 s 内有新帧、`led[3]` **曝光锁定**。
 
+M5 顶层（`top_vision_m5.v`）状态行扩到 **193 字节**、标识 `MH5`，在 `L=x` 与 `V=` 之间插入 29 字节行为字段：
+
+```
+MH5 K N=016080 F=0000A3 M=00001C P=2 S=068 E=0100 G=010 Y=060 L=1 T=2 Q=1 C=B4 D=0078 I=01 U=1 V=<94 hex>\r\n
+```
+
+| 字段 | 含义 |
+|---|---|
+| `MH5` | 固定标识（副板 M5） |
+| `K` / `N` / `F` / `M` / `P` / `S` / `E` / `G` / `Y` / `L` | **与 M4 逐字段同义**（SCCB 自检 / 像素数 / 形态学前 / 形态学后 / 人数 / 占用列数 / 曝光 / 增益 / 平均灰度 / 曝光锁定） |
+| `T` | **行为状态**（1 位十六进制）：`0`=IDLE `1`=PRESENCE `2`=SINGLE `3`=MULTI `4`=INTERACT `5`=LEAVE `6`=ALERT |
+| `Q` | **建议播放模式**（1 位十六进制）：`0`=STANDBY `1`=SINGLE `2`=MULTI `3`=INTERACT `4`=ALERT |
+| `C` | **置信度** 0..254（2 位十六进制）；≥128 建议采信，<64 建议忽略 |
+| `D` | **停留帧数**（4 位十六进制，60 帧 = 1 s；进入 LEAVE 后停更，锁定"看了多久"） |
+| `I` | **互动次数**（2 位十六进制，饱和） |
+| `U` | **死区滤波后人数**（与 `P` 对照看：两者之差就是死区正在吸收的抖动） |
+| `V` | 列投影曲线（与 M3/M4 同义，仍是行尾 94 个字符） |
+
+**字节账**：`66`（M4 公共前缀，含尾随空格）+ `29`（M5 字段）+ `2`（`V=`）+ `94`（曲线）+ `2`（CRLF）= **193**。
+字段位置经模型逐字节校验：`V` 落在 95、曲线 97..190、CR 191 / LF 192。
+因为前缀与 M4 **完全对齐**（只有 `MH4`→`MH5`），同一套日志解析脚本不用改就能同时读 M4/M5。
+
+判读要点（M5 的验收证据就在这三个字段）：
+- **有人走进画面** → `T` 由 `0` 变 `1`(PRESENCE) 再稳定到 `2`(SINGLE)，同时 `C` 从低位往上爬；
+- **两个人** → `T=3`(MULTI)、`Q=2`；`U` 与 `P` 不一致时说明死区正在挡未确认的人数抖动；
+- **挥手** → `T` 短暂进入 `4`(INTERACT)、`I` 计数 +1，`D` 继续累加；
+- **人走开** → `T=5`(LEAVE)，`D` 冻结在离开前那一刻的停留帧数；
+- `Q` 只是**建议**——按方案 §2.2，最终裁决权在主板。
+
+LED 指示（M5 **沿用 M4，不新增**）：`led[0]` 配置完成、`led[1]` 自检通过、`led[2]` 0.5 s 内有新帧、`led[3]` 曝光锁定。
+板载只有 4 颗 LED 且 M4 已占满；M5 的证据改由 `T=`/`Q=`/`C=` 三个串口字段承担——这也是"里程碑一经验证即冻结"原则的体现。
+
 ---
 
 ## 6 构建与验证
@@ -306,6 +355,39 @@ python tools/sim_vision_sub_m4.py
 
 **当前状态：62 项检查全部通过。**（模型在编写时还抓出 `div_cnt` 每拍自增导致写间隔守卫失效的真实 RTL bug，见 §10.3。）
 
+M5 模型——这一级第一次引入**"时间"**（停留时长、冷却、确认帧数），所以模型跑的是**帧级状态机**而不是像素：
+
+```bash
+python tools/sim_vision_sub_m5.py
+```
+
+模型会：
+1. **sized-literal 位宽审计**（`test_define_widths`）：扫描 `vision_def.v` 里所有
+   `N'base<value>` 形式的 `` `define ``，断言"字面量宽度 ≥ 数值所需位数"，并带负控
+   （必须能抓出 `9'd600` / `3'd8` 这两个真实 bug）。见 §11.3。
+2. 校验 M5 常量自洽：193 字节 = 68 + 29 + 94 + CRLF、曲线恰 94 字节、`M5_CURVE_END+1`
+   之后除 CR/LF 无残余、M5 行 = M4 行 + 29 字节；
+3. 复刻 `PplFilter`（±1 死区 + 同向 `PPL_CONFIRM` 帧确认、差 ≥2 立即跟随）；
+4. 复刻 7 态状态机：IDLE→PRESENCE→SINGLE/MULTI 阶梯、MULTI↔SINGLE 互转、
+   INTERACT 进入/冷却/退出、LEAVE 锁存 `D`、`IDLE_HOLD_FRAMES` 看门狗、ALERT 进入/退出；
+5. 复刻能量基线 EMA 与 `NRG_BASE_READY` 收敛计数，并**专门断言两个真实陷阱**：
+   上电基线为 0 把"来人"误判成突增、人数阶跃本身也是能量跳变（见 §11.3）；
+6. 几何坏帧：状态机冻结、置信度按 `SC_DN_SOFT` 缓降（负向对照：坏帧若照常跃迁，模型会红）；
+7. 逐字节比对 193 字节状态行（含 `V` 落在 95、CR/LF 落在 191/192 的边界断言）。
+
+**当前状态：130 项检查全部通过。**
+
+全量回归（386 → **418** 项）：
+
+| 模型 | 检查数 |
+|---|---|
+| `sim_vision_sub_m1.py` | 68 |
+| `sim_vision_sub_m2.py` | 74 |
+| `sim_vision_sub_m3.py` | 84 |
+| `sim_vision_sub_m4.py` | 62 |
+| `sim_vision_sub_m5.py` | **130** |
+| **合计** | **418** |
+
 ### 6.2 上板构建（TangDynasty）
 
 工程文件已随仓库提供（器件 EG4S20BG256）：
@@ -316,21 +398,85 @@ python tools/sim_vision_sub_m4.py
 | `src/vision_sub/td_project/vision_sub_m2.al` | `top_vision_m2` | 11 个 HDL + `pin.adc` + `timing.sdc` |
 | `src/vision_sub/td_project/vision_sub_m3.al` | `top_vision_m3` | 14 个 HDL + `pin.adc` + `timing.sdc` |
 | `src/vision_sub/td_project/vision_sub_m4.al` | `top_vision_m4` | 16 个 HDL + `pin.adc` + `timing.sdc` |
+| `src/vision_sub/td_project/vision_sub_m5.al` | `top_vision_m5` | 17 个 HDL（+`behavior_fsm.v`）+ `pin.adc` + `timing.sdc` |
 
-用 TD 打开对应的 `.al` 即可，首次打开时 TD 会生成 `_Runs/` 与 `.prj` 快照。之后可无头构建：
+用 TD 打开对应的 `.al` 即可，首次打开时 TD 会生成 `_Runs/` 与 `.prj` 快照。
 
-```powershell
-pwsh tools/td_build.ps1      # 无头构建，与本仓库主工程一致
+> ✅ **2026-09-13 已在真实 TD 6.2.1 SP1（build 6.2.178.840，`D:\TD\bin\td.exe`）上验证**：
+> `vision_sub_m1.al` 被 TD 正常打开，7 个 HDL 全部分析通过（`vision_def.v` 平铺 include 解析正确），
+> 综合→布线→bitgen 全绿，`vision_sub_m1.bit`（629 KB）已生成。
+> 时序：综合后 Setup WNS +8.123ns；布线后 Setup WNS +9.608ns / Hold WNS +0.030ns，零违例。
+> IO 报告与 `pin.adc` 一一对应（cam_d[0..7]=G11..K12、pclk=D14、href=L14、vsync=M14、
+> scl=P11、sda=L10 带上拉、uart_tx=D12/uart_rx=F12、led=A4/A3/C10/B12），
+> `cam_pclk` 走全局时钟网络（≈13 MHz，与 2×2 binning 后 PIXCLK 预期一致）。
+
+#### 无头构建（实测可用的运行目录流）
+
+M1 的 `_Runs/syn_1`、`_Runs/phy_1` 运行目录已随首次构建生成。重跑/换里程碑构建用
+**运行目录流**（每步几秒即完成）：
+
+```bash
+# 1) 综合（cd 进 syn_1，TD 会 source 当前目录的 settings.cfg）
+cd <td_project>/vision_sub_m1_Runs/syn_1
+TD_FLOW_SCRIPT='D:/TD/scripts/DefaultFlow.tcl' \
+  /d/TD/bin/td_commands_prompt.exe D:/TD/26Anlu/repo/tools/td_flow_exit.tcl \
+  > syn_stage.log 2>&1
+
+# 2) 布局布线 + bitgen（cd 进 phy_1；前提：syn_1/vision_sub_m1_gate.db 已存在）
+cd ../phy_1
+TD_FLOW_SCRIPT='D:/TD/scripts/DefaultFlow.tcl' \
+  /d/TD/bin/td_commands_prompt.exe D:/TD/26Anlu/repo/tools/td_flow_exit.tcl \
+  > phy_stage.log 2>&1
+# 产物：phy_1/vision_sub_m1.bit
 ```
 
-综合布线后下载 `best_result` 比特流。
+**⚠️ TD 6.2.1 无头构建的坑（全部实测踩过，别再踩）**：
 
-> ⚠️ **关于这四个 `.al`**：它们是按本仓库现有 `HDMI1.4b_Transmitter_v1.0.al` 的结构手写的，
-> 已校验 XML 结构、器件型号、顶层模块名与全部文件引用（`vision_sub_m2.al` / `vision_sub_m3.al` /
-> `vision_sub_m4.al` 另校验了"顶层例化的每个模块都在工程文件表里"），但**未在真实 TD 上打开验证过**（当前开发机未安装 TD）。若 TD 打开时报错，
-> 直接用 GUI 新建工程、把对应 `.v` 与 2 个约束加进去即可，30 秒的事——本工程没有任何 IP 核，
-> 重建成本极低。注意 `.al` 里 `UsedInP&R` 用的是**裸 `&`**（TD 自己的写法，非标准 XML），
-> 这是刻意与 TD 保持一致；`vision_sub_m3.al` 另按 TD 原生文件的行尾（CRLF）落盘。
+1. **不要用项目模式 `launch_runs`/`wait_run`**（`td_headless.tcl` 那条路）：综合在
+   td_commands_prompt 进程内跑完不落盘，一旦进程退出结果全丢；`reset_runs` 还会
+   **级联重置依赖的 syn run**，把已有产物清掉；`wait_run` 对"子进程秒死"不感知，
+   永远打印 Waiting。
+2. **运行目录的 `settings.cfg` 若由项目模式重新生成，`device_name`/`package_name`
+   会是空值** → `import_device` 失败，run.exe 只留横幅即死。手工补上：
+   `set device_name eagle_s20.db` / `set package_name EG4S20BG256`。
+3. **TD 自己生成的 `run.bat` 是坏的**：exe 名拼接错误（`td_commands_prompt_commands_prompt.exe`），
+   且未包退出包装。忽略 run.bat，直接按上面的命令行调用。
+4. `td_build.ps1` 的默认路径是旧机器的（`d:\Nizhenghang\...`、`D:\Download\TD`），
+   本机 TD 装在 `D:\TD\`，用前需改参数；其"运行目录流"原理与上面一致。
+5. Git Bash 里杀 TD 进程用 `MSYS2_ARG_CONV_EXCL='*' taskkill /F /PID <pid>`；
+   本会话的 PowerShell 工具不回显输出，进程排查一律用 `tasklist` 而非 Get-Process。
+6. M2/M3/M4/M5 的 `.al` 首次打开后同样会生成运行目录；若 `settings.cfg` 出现空值按第 2 条补齐即可。
+7. **运行目录流真正打开的是 `.prj` 快照，不是 `.al`**（`DefaultFlow.tcl` 里执行的是
+   `open_project <prj>.prj`）。TD **只在"创建运行目录"那一次**写这个快照；运行目录一旦已存在，
+   `open_project <.al>` 就不再写它。此时 syn 会以"零个设计文件"开跑，唯一症状是：
+   ```
+   PRJ-1401 : Successfully analyzed 1 source files.     <- 只有 1 个，正常是十几到二十几个
+   HDL-8001 ERROR: Incorrect top-level module name "top_vision_m5", please reset
+   ```
+   这个报错**方向性极差**（像是顶层名字写错了），实际根因是 `.prj` 缺了或内容不对。
+   快照丢了/要重建，用：
+   ```bash
+   python tools/td_make_prj.py src/vision_sub/td_project/vision_sub_m5.al \
+                               src/vision_sub/td_project/vision_sub_m5_Runs/syn_1/vision_sub_m5.prj
+   ```
+   `td_make_prj.py` 把 `.al` 确定性地转成 `.prj`（3 处变换 + 重标 `AutoExcluded`），
+   **已用 M1 的真实 `.prj` 做过逐字节验证**（除 `RunTime` 外完全一致）。
+8. **`.al` 里的 `AutoExcluded="true"` 只能标在"不含 `module` 的纯 `` `include `` 文件"上**
+   （本项目就是 `vision_def.v`）。若它被误标到模块文件上，TD 会把这些文件**排除出读取列表**，
+   于是 elaborate 空转、报上面那个 `HDL-8001`。`vision_sub_m4.al` / `vision_sub_m5.al`
+   曾各带 15 个误标（从一份"源文件当时不在工作副本里"的旧快照派生而来，`m5.al` 又继承了
+   `m4.al`），2026-09-14 已修正为"只有 `vision_def.v` 被标"。**派生新 `.al` 时务必核对这一项**：
+   ```bash
+   grep -c AutoExcluded src/vision_sub/td_project/vision_sub_m5.al   # 应为 1
+   ```
+9. **别用 `tail -f /dev/null |` 来"保持 stdin 不 EOF"**：管道里的 `tail` 永不退出，
+   bash 认为整条管道没结束，后台 shell 的 cwd 就一直停在运行目录里 → 该目录**无法
+   rename/删除**（文件仍可写，所以现象很迷惑）。实测 `td_commands_prompt.exe <tcl>`
+   **不给 stdin 也能正常跑完并退出**，直接跑更干净。
+10. **强杀 TD 会留下 `td_project/.lock.f`**（里面记着已死的 PID）和**孤儿 `td.exe`**
+    （GUI 进程，实测可涨到 560 MB，会占住项目目录）。杀完记得删 `.lock.f`。
+11. Git Bash 里 `grep -q $'\r'` 判断换行符不可靠；要确认 CRLF 用 Python 数 `\r\n` 与 `\n`。
+    MSYS 风格路径 `/d/TD/...` **不能传给 Windows 的 Python**（会变成 `D:\d\TD\...`），要写 `D:/TD/...`。
 
 
 ### 6.3 上板验收步骤
@@ -564,6 +710,33 @@ col_occ = (bin > SEG_COL_THRESH)       二值化
 > 结论：BRAM 仍是整个设计最紧的资源，但 M3 的"寄存器阵列代替 BRAM"选择使预算没有被进一步挤压。
 > 该修正项已回写设计方案 v2.0 §6。
 
+> ### ⚠️ 二次修正（2026-09-14，真实构建实测）——上面这笔账算错了
+>
+> 上面的 "136 KB" 是**把两个物理互斥的池子加起来**得到的，而 TD 的布线器只按 **9K 池**判容量：
+>
+> | 池 | 容量 | TD 是否自动使用 |
+> |---|---|---|
+> | 9K EMB | **64 块 × 9 kbit = 576 kbit = 72 KB** | ✅ 推断 `reg [7:0] mem[..]` 就落在这里；TD 的 `emb` 上限 = 64 |
+> | 32K EMB | 16 块 × `EG_PHY_BRAM32K`（2048×16）= 512 kbit = 64 KB | ❌ 需**手工实例化原语**，推断不会用 |
+>
+> 于是 M2 的背景帧（`bg_store.v` = `reg[7:0] mem[0:90239]` = 90,240 B = **705 kbit**）
+> 单靠 9K 池 **理想打包也装不下**（72 KB < 88 KB）。真实 TD 综合报告与布线报错：
+>
+> ```
+> #bram   128  out of  64   200.00%          (syn 的 gate.area)
+> PHY-9013 ERROR: Design's emb number = 128, exceeds the limit 64.
+> ```
+>
+> **所以"M2 不用 SDRAM、背景帧放片内 BRAM"这个决策不成立**，必须改。三条候选路线见 §11.4，
+> 属架构决策，待定。注意这**不是 M5 引入的问题**——M4 从未真正编译过，所以这个墙一直没被撞到；
+> M5 是第一个走到 P&R 的里程碑。资源占用实测（M5 综合，`gate.area`）：
+>
+> ```
+> #lut   6039 / 19600  30.81%      #bram  128 / 64  200.00%  ← 唯一的红项
+> #reg   5610 / 19600  28.62%      #dsp      2 / 29    6.90%
+> ```
+> 其中 `behavior_fsm` 只占 493 LUT / 157 FF —— **M5 本身几乎不花钱，瓶颈全在 M2 的帧缓存。**
+
 ---
 
 ## 10 M4 里程碑：自动曝光闭环
@@ -655,3 +828,148 @@ err   = sum − TARGET_SUM              （>0 偏亮，<0 偏暗）
 6. 对照 `E` 与 `G`：正常照度下 `G` 恒为 `010`；只有把镜头完全捂死（`E` 到 `03FF`）后
    `G` 才开始增大；
 7. 全程 `N=016080`，且 `M`/`P`/`S`/`V` 的行为与 M3 一致（M4 不应干扰前三级）。
+
+---
+
+## 11 M5 里程碑：行为状态机 + 置信度
+
+M1~M4 只是把画面变成数字；**M5 才第一次给出主板能用的决策依据**。
+但按方案 §2.2 的结论，副板只出 `(state, mode, conf)` 三元组，**最终裁决权在主板**——
+副板不知道媒体清单、播放进度与内容分级，它报错时主板要能降级成定时循环而不是黑屏。
+
+### 11.1 目标与验收
+
+| 目标 | 验收手段 | 通过判据 |
+|---|---|---|
+| 有人靠近 | 串口 `T`/`Q`/`C` | 人走进画面后 `T` 由 `0` → `1` → 稳定到 `2`，`Q` 变 `1`，`C` 单调上升 |
+| 多人区分 | 串口 `T`/`Q`/`U` | 两人并肩 → `T=3`、`Q=2`；`U` 与 `P` 不一致即死区在挡未确认的抖动 |
+| 互动识别 | 串口 `T`/`I` | 挥手 → `T` 短暂 `4`、`I` 计数 +1，冷却期内不重复计数 |
+| 停留时长 | 串口 `D` | 有人期间 `D` 每帧 +1；人走开 → `T=5` 且 `D` **冻结**（锁定"看了多久"） |
+| 冷启动不误报 | 无人在场 | 上电后 `T` 恒为 `0`（IDLE），绝不自发进入 PRESENCE |
+| 抗抖动 | 人在场轻微晃动 | `±1` 人数抖动不改变 `T`/`Q`（死区吸收） |
+| 不与曝光闭环打架 | 遮挡/照亮镜头 | M4 的曝光调整引起全画面亮度平移时，`I` 不增加（§11.2 的两个陷阱） |
+
+### 11.2 算法与实现
+
+**状态与建议模式的映射**（`behavior_fsm.v`，纯 RTL 状态机，无软核）：
+
+| 状态 `T` | 含义 | 建议模式 `Q` |
+|---|---|---|
+| `0` IDLE | 无人且久无动静 | `0` STANDBY |
+| `1` PRESENCE | 刚检测到人，尚未站定 | `1` SINGLE |
+| `2` SINGLE | 一个人站定 | `1` SINGLE |
+| `3` MULTI | 两个及以上 | `2` MULTI |
+| `4` INTERACT | 正在互动（挥手/前推） | `3` INTERACT |
+| `5` LEAVE | 人刚离开（停留时长已锁定） | `0` STANDBY |
+| `6` ALERT | 占用列触及画面最外侧警戒带 | `4` ALERT |
+
+迁移条件（`frame_tick` 驱动，全部以"帧"为单位）：
+
+```
+IDLE            ── 人数≥1 连续 EVT_CONFIRM 帧 ──────→ PRESENCE
+PRESENCE        ── 停止抖动且稳定 STABLE_FRAMES 帧 ──→ SINGLE
+PRESENCE        ── 人数≥2 连续 EVT_CONFIRM 帧 ──────→ MULTI
+INTERACT        ── 能量回落 或 冷却 COOL_FRAMES 到期 ─→ SINGLE/MULTI
+SINGLE / MULTI  ── 占用范围触及最外 GUARD_EDGE 列 ───→ ALERT
+任意"有人态"     ── 人数 0 持续 LEAVE_FRAMES ────────→ LEAVE（锁存 D）
+LEAVE           ── 人数≥1 ────────────────────→ PRESENCE
+LEAVE           ── 无人再持续 IDLE_HOLD_FRAMES ──→ IDLE
+```
+
+**防误触发四条**（方案 §2.2 的落地）：
+
+1. **人数死区 + 同向确认**：与当前滤波值相差 `±1` 不认；同向变化要连续
+   `PPL_CONFIRM`(=3) 帧才跟随；**差 ≥2 立即跟随**（真来了一群人不用等）。
+   注意死区不是"把 2 人突发滤成 1 人"——短于 3 帧的突发被完全滤掉，长于等于 3 帧的
+   持续**会被当真**；死区真正独立的贡献是让报告人数 `U` 稳定、并挡住"尚未确认的证据"。
+2. **所有跃迁都要帧确认**：进入/退出用同一门限 `EVT_CONFIRM`(=3)，
+   避免边缘抖动造成状态反复横跳。
+3. **互动带冷却**：命中后驻留 `COOL_FRAMES`(=90, 1.5 s)，期间不再产生新的互动事件。
+4. **质心安静判定**：质心每帧位移 ≤ `CTR_QUIET`(=3 箱) 才算"安静"，
+   用于把"站着不动"与"在挥手"区分开。
+
+**能量基线 EMA 与两个真实陷阱**（这一级最容易写错的地方）：
+
+互动判据不能只看"前景像素数突然变大"——因为**人数变化本身就是能量阶跃**。
+基线取一阶 EMA（`NRG_BASE_SHIFT`=5，即 1/32），并以两个陷阱为设计依据：
+
+| 陷阱 | 现象 | 修法 |
+|---|---|---|
+| ① 上电基线为 0 | 第一个走进来的人 = 从 0 到 N 的"突增"，冷启动就误报一次互动 | `base_init`：**首个有效帧直接把基线灌成当前能量**，不走 EMA |
+| ② 人数阶跃 | 第 2 个人走进来，前景像素数翻倍 → 被当成挥手 | 跟踪**原始人数** `ppl_i`；人数一变就清 `warm_cnt`，要连续 `NRG_BASE_READY`(=32) 帧基线才追上，期间不判互动 |
+
+陷阱②的关键细节：`warm_cnt` 的清零是非阻塞赋值，若只用 `warm_cnt == READY` 判断，
+人数阶跃那一帧读到的还是旧值，防护整整晚一拍——而能量跳变恰好就发生在这一拍。
+所以组合条件里必须**同时**看 `pplr_chg`（原始人数变化），见 `behavior_fsm.v` 的注释。
+
+**置信度合成**（无乘法器）：
+
+```
+sc_dwell  : 有人 +SC_UP，无人 −SC_DN     （待得久 → 可信）
+sc_motion : 能量 ≥ NRG_LO 时 +SC_UP，否则 −SC_DN（真的有东西在）
+sc_quiet  : 质心安静 +SC_UP，抖动 −SC_DN  （拿得准 → 可信）
+conf = (sc_sum × 85) >> 8   ≈ sc_sum / 3.01，饱和 254
+```
+
+`×85` 用移位相加实现（`64+16+4+1`），`>>8` 用切片——整个 M5 不消耗任何乘法器。
+三个分项各自饱和积分，所以短暂遮挡只会让 `C` 缓降而不会瞬间清零。
+
+**几何坏帧**：`N ≠ 90240` 时状态机**冻结**（不跃迁），只让三个评分按 `SC_DN_SOFT` 缓降。
+接错排线/丢帧时不该凭空改变行为判断。
+
+### 11.3 TD 真实编译揪出的三类问题（模型全部抓不到）
+
+M5 是本项目**第一个真正走到布局布线的里程碑**（M2/M3/M4 此前只过了 Python 模型）。
+TD 一编译就抓出三个 Python 模型的结构性盲区——任意精度 + 不检查 Verilog 类型/顺序：
+
+| # | 问题 | TD 的反应 | 后果 | 修法 |
+|---|---|---|---|---|
+| 1 | `IDLE_HOLD_FRAMES 9'd600` | 只有 `HDL-5007 WARNING` | **静默截断成 88 帧（≈1.5 s）**，而设计意图是 10 s | 改 `10'd600`（`idle_cnt` 本来就是 10 位） |
+| 2 | `CONF_SHIFT 3'd8` | 只有 `HDL-5007 WARNING` | 截断成 0（当时未被引用，是潜伏雷） | 改 `4'd8` |
+| 3 | `behavior_fsm.v` 的 `reg` 声明写在引用之后 | `HDL-5373 WARNING: used before its declaration` | 对 `pplf`/`ctr_p`/`nrg_base` 这类多比特量，早期工具会退化成**隐式 1-bit net** | 整个 `reg` 块前移到组合逻辑之前 |
+
+> 教训：**"TD 没报 ERROR" 不等于"代码是对的"**。上面两条都是 WARNING 级，
+> 但会静默改变行为。已把第 1/2 类问题固化成模型里的**位宽审计**
+> （`test_define_widths`，带负控），改动 `` `define `` 后必跑。
+> 第 3 类只能靠真实编译——所以**每个里程碑都要真的跑一次 TD syn**。
+
+修复后 M5 综合结果：**0 ERROR**，无 `HDL-5007` / `HDL-5373`，
+`elaborate module top_vision_m5` 正常，`Successfully analyzed 16 source files`
+（17 个 HDL − 1 个 include-only 的 `vision_def.v`）。
+
+### 11.4 ⛔ 已知阻断：BRAM 装不下背景帧（待架构决策）
+
+M5 综合通过，但**布线被 TD 拒绝**：
+
+```
+PHY-9013 ERROR: Design's emb number = 128, exceeds the limit 64.
+```
+
+根因**不在 M5**，而在 M2 的帧缓存决策（详见 §9.5 的二次修正）：
+`bg_store.v` 的背景帧 90,240 B = 705 kbit，而 TD 只按 9K 池（64 块 = 576 kbit = 72 KB）判容量。
+`behavior_fsm` 本身只占 493 LUT / 157 FF——**M5 几乎不花钱，墙全在 M2。**
+
+三条候选路线（属架构决策，需与硬件侧一并定）：
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| **A. 启用片内合封 SDRAM**（推荐） | 用 `EG_PHY_SDRAM_2M_32`（8 MB）+ 写 `sdram_ctrl.v`，帧缓存全面走 SDRAM | 要写 SDRAM 控制器与仲裁（方案 v2.0 本来就规划了 `sdram_ctrl.v` / `frame_buf3.v`）；换来 8 MB 余量，也顺带解锁 M1b/M3 需要的整帧随机访问 |
+| **B. 32K 原语 + 9K 混合** | 手工实例化 16 × `EG_PHY_BRAM32K`（64 KB）+ 约 22 块 9K（25 KB）拼出背景帧 | 不用 SDRAM 控制器，但**设备相关原语**、地址译码复杂，且 Python 模型无法覆盖 |
+| **C. 降低帧缓存占用** | 降低处理分辨率（如 188×120，背景帧 22.5 KB）或降低背景位宽 | 算法改动，会削弱 M3 的分段质量（列箱数减半） |
+
+> A 是设计文档原本的路线（方案 v2.0 模块清单里就有 `sdram_ctrl.v` + `frame_buf3.v`），
+> 只是在 M2 实施时为了"少写一个控制器"改成了 BRAM，现在被真实构建证伪。
+
+### 11.5 上板验收步骤（M5，待帧缓存方案定论后执行）
+
+1. 帧缓存方案落地后按 §6.2 构建 `vision_sub_m5.al` 并下载；串口 115200-8N1；
+2. **空场**：观察 `MH5 ... T=0 Q=0 C=xx` 长时间保持（IDLE 不倒）；`D`/`I` 不增长；
+3. **一人走近**：`T` 由 `0`→`1`→`2`，`Q` 变 `1`，`C` 持续上升；`D` 开始累加；
+4. **第二人进入**：`T=3`、`Q=2`；留意 `U` 与 `P` 的差异（死区在挡未确认抖动）；
+5. **挥手**：`T` 短暂 `4`、`I` +1；**1.5 s 内反复挥手不应连续计数**（冷却生效）；
+6. **离开**：`T=5`，确认 `D` **冻结**在离开前那一刻的值；
+7. **保持无人 10 s**：`T` 应回到 `0`（`IDLE_HOLD_FRAMES` 生效）；
+8. **遮挡镜头**（让 M4 调曝光）：确认 M4 的亮度平移**不会**让 `I` 增加
+   （这是陷阱①/②上板后的最终验证）；
+9. 全程 `N=016080`，且 `F`/`M`/`P`/`S`/`E`/`G`/`Y`/`L`/`V` 与 M4 表现一致
+   （M5 不应干扰前四级）。

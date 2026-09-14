@@ -2,7 +2,7 @@
 <Project Version="3" Minor="2" Path="D:/TD/26Anlu/src/vision_sub/td_project">
     <Project_Created_Time></Project_Created_Time>
     <TD_Version>6.2.178840</TD_Version>
-    <Name>vision_sub_m4</Name>
+    <Name>vision_sub_m5</Name>
     <HardWare>
         <Family>EG4</Family>
         <Device>EG4S20BG256</Device>
@@ -131,12 +131,20 @@
                     <Attr Name="CompileOrder" Val="15"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/top_vision_m4.v">
+            <File Path="../user_source/hdl_source/behavior_fsm.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="16"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/top_vision_m5.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="17"/>
                 </FileInfo>
             </File>
         </Verilog>
@@ -168,8 +176,8 @@
         </FileSet>
     </FileSets>
     <TOP_MODULE>
-        <LABEL>top_vision_m4</LABEL>
-        <MODULE>top_vision_m4</MODULE>
+        <LABEL>top_vision_m5</LABEL>
+        <MODULE>top_vision_m5</MODULE>
         <CREATEINDEX>user</CREATEINDEX>
     </TOP_MODULE>
     <Property>

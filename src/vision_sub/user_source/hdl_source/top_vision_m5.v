@@ -1,40 +1,48 @@
 // ============================================================
-// top_vision_m4.v
-// 视觉处理副板 M4 顶层（安路 EG4S20BG256 / 康芯 HX4S20）
+// top_vision_m5.v
+// 视觉处理副板 M5 顶层（安路 EG4S20BG256 / 康芯 HX4S20）
 //
-// M4 目标（对应方案 v2.0 第 7 节）：自动曝光闭环。
-//   在 M3（形态学 + 投影 + 人数）之上叠加：
-//     + exp_meter.v   帧亮度计量（sum / cnt / 饱和像素数）
-//     + auto_exp.v    关掉片上 AEC/AGC，改由 FPGA 按目标亮度闭环回写
-//                     R0x0B（粗快门）/ R0x35（模拟增益）
+// M5 目标（对应方案 v2.0 §2.2/§7）：行为状态机 + 置信度。
+//   在 M4（自动曝光闭环）之上叠加：
+//     + behavior_fsm.v  把 M3 的逐帧瞬时量读成"行为"：
+//                       有人来了 / 站定了 / 几个人 / 在互动 / 离开了多久
+//     输出 = 行为状态 + 建议播放模式 + 置信度 + 停留时长 + 互动次数
 //
-// 【为什么 M4 是 M2/M3 能不能稳的前提】
-//   片上 AEC 会随场景持续微调曝光；曝光一动整帧灰度集体平移，帧差立刻
-//   满屏假前景，M2 的背景模型被反复冲垮、M3 的投影曲线跟着乱跳。
-//   所以 M4 先把 R0xAF 写 0 独占曝光控制权，亮度稳定后前两级才有意义。
+// 【为什么 M5 是"副板真正有用"的那一步】
+//   M1~M4 只是把画面变成数字；M5 才第一次给出主板能用的决策依据。
+//   但注意方案 §2 的结论：**副板只给建议，最终裁决权在主板**——
+//   副板不知道媒体清单/播放进度/内容分级，报错时主板要能降级到
+//   定时循环而不是黑屏，所以这里只出 (state, mode, conf) 三元组。
 //
-// 状态行 164 字节：
-//   MH4 K N=xxxxxx F=xxxxxx M=xxxxxx P=x S=xxx E=xxxx G=xxx Y=xxx L=x V=<94 hex>
-//     K = SCCB 自检（cam_ok）
-//     N = 本帧有效像素数，应 = 90240
-//     F = 形态学前前景像素数      M = 形态学后前景像素数
-//     P = 人数估计                S = 占用列数
-//     E = 当前曝光值（R0x0B 粗快门总量，4 位十六进制）
-//     G = 当前模拟增益（R0x35，3 位十六进制）
-//     Y = 本帧平均灰度（3 位十六进制）——闭环的直接观测量
-//     L = 曝光锁定标志（1 = 已连续多帧落在死区内）
-//     V = 列投影曲线，94 个 hex 字符（与 M3 同义）
+// 状态行 193 字节：
+//   MH5 K N=xxxxxx F=xxxxxx M=xxxxxx P=x S=xxx E=xxxx G=xxx Y=xxx L=x
+//     T=x Q=x C=xx D=xxxx I=xx U=x V=<94 hex>
+//     （前缀与 M4 **逐字段对齐**，唯一区别是版本标识 '4'→'5'，这样
+//       同一套日志解析脚本不用改就能同时读 M4/M5；新增的 29 字节
+//       M5 字段（66..94）紧接在 L=x 之后、'V=' 标签之前，曲线仍在
+//       行尾 94 字符。字节账：66(M4 公共前缀，含尾随空格)
+//       + 29(M5 字段) + 2("V=") + 94(曲线) + 2(CRLF) = 193）
+//     K = SCCB 自检（cam_ok）      N = 本帧有效像素数（= 90240）
+//     F = 形态学前前景像素数        M = 形态学后前景像素数
+//     P = 人数估计（瞬时）          S = 占用列数
+//     E = 当前曝光（R0x0B 粗快门）  G = 当前模拟增益（R0x35）
+//     Y = 本帧平均灰度              L = 曝光锁定标志
+//     T = 行为状态（0=IDLE 1=PRESENCE 2=SINGLE 3=MULTI 4=INTERACT
+//                   5=LEAVE 6=ALERT）
+//     Q = 建议播放模式（0=STANDBY 1=SINGLE 2=MULTI 3=INTERACT 4=ALERT）
+//     C = 置信度 0..254（≥128 建议采信，<64 建议忽略）
+//     D = 停留帧数（60 帧 = 1 s）   I = 互动次数
+//     U = 死区滤波后人数（与 P 对照看，差值就是死区正在吸收的抖动）
+//     V = 列投影曲线，94 个 hex 字符（与 M3/M4 同义）
 //
-// 时钟域与 M1/M2/M3 相同：sys_clk 50MHz（SCCB/串口/上报/曝光闭环）+
-// cam_pclk≈13.5MHz（DVP 采集 + 全部像素流水线，单域内完成，无 CDC）。
-// 跨时钟域用两处"翻转握手 + 准静态快照"：
-//   1) viz_done_tog（投影读出结束）→ M3 结果快照
-//   2) meter_done_tog（帧亮度锁存）→ M4 亮度快照，并派生 frame_tick
-//      （帧起始一拍，落在垂直消隐期 —— 曝光回写必须对齐消隐期）
+// 时钟域与 M1~M4 相同：sys_clk 50MHz（SCCB/串口/上报/曝光闭环/行为状态机）
+// + cam_pclk≈13.5MHz（DVP 采集 + 全部像素流水线，单域内完成）。
+// 跨时钟域仍是"翻转握手 + 准静态快照"，M5 复用 M4 已经建立的
+// frame_tick（每帧一拍，落在垂直消隐期）作为状态机节拍——不新增 CDC 通路。
 // ============================================================
 `include "vision_def.v"
 
-module top_vision_m4
+module top_vision_m5
 (
 	input                       sys_clk,     // R7, 50 MHz
 	input                       rst_n,       // KEY1(A2)，低有效
@@ -52,7 +60,7 @@ module top_vision_m4
 	output[3:0]                 led          // A4 A3 C10 B12
 );
 
-localparam LINE_LEN = `M4_LINE_LEN;
+localparam LINE_LEN = `M5_LINE_LEN;
 localparam CURVE_W  = `CURVE_N * 4;      // 376
 
 // ------------------------------------------------------------
@@ -86,16 +94,7 @@ wire rst_p_n = por_sync_p[1];           // pclk 域，低有效
 
 // ------------------------------------------------------------
 // SCCB 主机 + 配置序列 + 曝光闭环回写 的请求仲裁
-//
-//   两个请求方共用一条 SCCB：
-//     mt9v034_cfg（sys 域）—— 上电配置表 + 版本自检
-//     auto_exp   （sys 域）—— 曝光/增益回写
-//   仲裁规则极简：cfg_busy 期间一律归 cfg，否则归 auto_exp。
-//   因为 cfg_busy 从复位起就是 1（mt9v034_cfg 的 C_PWRWAIT 就把它拉高），
-//   所以 auto_exp 在配置完成前**天然发不出任何事务**；而 auto_exp 自身
-//   还要等 cfg_done 才离开 E_INIT，两道锁叠加，不存在两个控制器同时
-//   改 R0xAF 而互相打架的可能（那正是要避免的：片上 AEC 与 FPGA 闭环
-//   抢同一个寄存器会谁也收敛不了）。
+//   （与 M4 完全一致：cfg_busy 期间归 cfg，否则归 auto_exp）
 // ------------------------------------------------------------
 wire        cfg_req;
 wire        cfg_rw;
@@ -124,7 +123,6 @@ wire        sccb_rw_w    = cfg_busy ? cfg_rw    : 1'b0;      // auto_exp 只写
 wire[15:0]  sccb_addr_w  = cfg_busy ? cfg_addr  : exp_addr;
 wire[15:0]  sccb_wdata_w = cfg_busy ? cfg_wdata : exp_wdata;
 
-// auto_exp 只在 cfg 空闲时才"看见"事务完成
 assign exp_busy = sccb_busy & (~cfg_busy);
 assign exp_ack  = sccb_ack  & (~cfg_busy);
 
@@ -194,7 +192,7 @@ dvp_capture u_cap
 );
 
 // ------------------------------------------------------------
-// 帧指纹（几何回归，N 字段的来源；与 M1/M2/M3 同源，保证 N 可比）
+// 帧指纹（几何回归，N 字段的来源；与 M1~M4 同源，保证 N 可比）
 // ------------------------------------------------------------
 wire[31:0] f_sum;
 wire[23:0] f_cnt;
@@ -217,9 +215,7 @@ frame_stat u_stat
 );
 
 // ------------------------------------------------------------
-// M4：帧亮度计量（PCLK 域）
-//   与 frame_stat 并行存在，故意不合并：多一个约 60 FF 的累加器，
-//   换 M1 的模块与模型**零改动**。里程碑一经验证即冻结，是本项目的硬规矩。
+// 帧亮度计量（PCLK 域，M4）
 // ------------------------------------------------------------
 wire[31:0] e_sum;
 wire[23:0] e_cnt;
@@ -374,7 +370,6 @@ people_seg u_seg
 
 // ------------------------------------------------------------
 // M4：曝光闭环控制器（sys 域）
-//   输入用同步过来的亮度快照（见下），输出接到上面仲裁的 exp_* 一侧。
 // ------------------------------------------------------------
 wire[15:0] exp_shut_v;
 wire[15:0] exp_gain_v;
@@ -382,7 +377,6 @@ wire[7:0]  exp_mean_v;
 wire       exp_locked_v;
 wire[15:0] exp_wr_cnt;
 
-// 亮度快照 + frame_tick 的产生（见下节的 CDC 小节，这里先声明）
 reg[31:0] snap_sum;
 reg[23:0] snap_ecnt;
 reg[23:0] snap_sat;
@@ -411,8 +405,6 @@ auto_exp u_aexp
 
 // ------------------------------------------------------------
 // 跨时钟域 1：投影读出结束翻转 → sys 域边沿 → 延时抓取 M3 准静态快照
-//   用 viz_done_tog（读出结束）而不是 frame_start：人数/占用列/曲线都是
-//   读出过程里逐箱攒出来的，必须等读出结束再抓，否则抓到的是上一帧结果。
 // ------------------------------------------------------------
 reg[2:0] tog_sync = 3'b000;
 always@(posedge sys_clk)
@@ -437,6 +429,12 @@ reg[16:0]        snap_m;
 reg[3:0]         snap_ppl;
 reg[9:0]         snap_ocs;             // 占用列数 = 占用箱数 x 4
 reg[CURVE_W-1:0] snap_curve;
+// ---- M5 新增快照（纯增量，不动上面任何字段，M1~M4 的 N/F/M/P/S 逐字节不变）----
+reg[6:0]         snap_ctr;             // 质心列箱 = (cf + cl) >> 1
+reg[6:0]         snap_cf;
+reg[6:0]         snap_cl;
+reg[7:0]         snap_occ;             // 占用列箱数（M5 判警戒区用）
+reg[16:0]        snap_nrg;             // 形态学后前景像素数（M5 判能量突增用）
 
 always@(posedge sys_clk or posedge rst_sys)
 begin
@@ -448,6 +446,11 @@ begin
 		snap_ppl   <= 4'd0;
 		snap_ocs   <= 10'd0;
 		snap_curve <= {CURVE_W{1'b0}};
+		snap_ctr   <= 7'd0;
+		snap_cf    <= 7'd0;
+		snap_cl    <= 7'd0;
+		snap_occ   <= 8'd0;
+		snap_nrg   <= 17'd0;
 	end
 	else if(snap_ld == 1'b1)
 	begin
@@ -457,15 +460,16 @@ begin
 		snap_ppl   <= s_ppl;
 		snap_ocs   <= {s_occ, 2'b00};
 		snap_curve <= curve_bits;
+		snap_ctr   <= (s_cf + s_cl) >> 1;
+		snap_cf    <= s_cf;
+		snap_cl    <= s_cl;
+		snap_occ   <= s_occ;
+		snap_nrg   <= m_cnt;
 	end
 end
 
 // ------------------------------------------------------------
 // 跨时钟域 2：帧亮度锁存翻转 → sys 域边沿 → 亮度快照 + frame_tick
-//   exp_meter 在 frame_start（落在垂直消隐期）锁存 sum/cnt/sat，
-//   锁存值在整帧内稳定，所以"边沿 + 延时抓拍"两拍足够。
-//   frame_tick 取在快照之后一拍，保证 auto_exp 决策时快照已稳。
-//   这一拍也正好让"曝光回写只在帧起始/消隐期发生"成立。
 // ------------------------------------------------------------
 reg[2:0] mt_sync = 3'b000;
 always@(posedge sys_clk)
@@ -483,7 +487,7 @@ begin
 end
 
 wire exp_ld     = mt_dly[2];           // 抓亮度快照
-assign frame_tick = mt_dly[3];           // 快照稳后再发决策脉冲
+assign frame_tick = mt_dly[3];           // 快照稳后再发决策脉冲（M5 也用它）
 
 always@(posedge sys_clk or posedge rst_sys)
 begin
@@ -502,6 +506,50 @@ begin
 end
 
 // ------------------------------------------------------------
+// M5：行为状态机（sys 域，帧节拍 = frame_tick）
+//   输入全部取自上面两组快照，因此 M5 与 M4 共享同一个帧节拍，
+//   不会出现"状态机看到的是第 n 帧、曝光看到的是第 n+1 帧"的错位。
+//   geom_ok 用亮度计量的像素数判（每帧都为 90240；画面几何坏掉时
+//   状态机冻结，见 behavior_fsm.v 的说明）。
+// ------------------------------------------------------------
+wire[2:0]  b_st;
+wire[2:0]  b_mode;
+wire[7:0]  b_conf;
+wire[15:0] b_dwell;
+wire[7:0]  b_icnt;
+wire[3:0]  b_pplf;
+wire       b_ev_enter;
+wire       b_ev_leave;
+wire       b_ev_interact;
+wire[1:0]  b_dir;
+wire       b_push;
+
+behavior_fsm u_beh
+(
+	.clk          (sys_clk),
+	.rst          (rst_sys),
+	.frame_tick   (frame_tick),
+	.geom_ok      (snap_ecnt == `CAM_FRAME_PIX),
+	.ppl_i        (snap_ppl),
+	.ctr_i        (snap_ctr),
+	.cf_i         (snap_cf),
+	.cl_i         (snap_cl),
+	.occ_i        (snap_occ),
+	.nrg_i        (snap_nrg),
+	.st_o         (b_st),
+	.mode_o       (b_mode),
+	.conf_o       (b_conf),
+	.dwell_o      (b_dwell),
+	.icnt_o       (b_icnt),
+	.pplf_o       (b_pplf),
+	.ev_enter_o   (b_ev_enter),
+	.ev_leave_o   (b_ev_leave),
+	.ev_interact_o(b_ev_interact),
+	.dir_o        (b_dir),
+	.push_o       (b_push)
+);
+
+// ------------------------------------------------------------
 // 打印寄存器（发送开始时从快照锁存，保证整行一致）
 // ------------------------------------------------------------
 reg[23:0]        prt_cnt;
@@ -515,6 +563,13 @@ reg[7:0]         prt_mean;      // Y 字段：本帧平均灰度
 reg              prt_lock;      // L 字段：曝光锁定
 reg              prt_ok;
 reg[CURVE_W-1:0] curve_sh;
+// ---- M5 字段 ----
+reg[2:0]         prt_st;        // T 字段
+reg[2:0]         prt_mode;      // Q 字段
+reg[7:0]         prt_conf;      // C 字段
+reg[15:0]        prt_dwell;     // D 字段
+reg[7:0]         prt_icnt;      // I 字段
+reg[3:0]         prt_pplf;      // U 字段
 
 // ------------------------------------------------------------
 // 行字节生成
@@ -529,13 +584,15 @@ function[7:0] hexc;
 	end
 endfunction
 
+// 固定字符表。M4 的 0..67 一个都没动，M5 新字段落在 68..96；
+// 曲线整段后移到 97..190，CR/LF 落在 191/192。
 function[7:0] fixed_char;
 	input[7:0] i;
 	begin
 		case(i)
 			8'd0:   fixed_char = 8'h4D;   // 'M'
 			8'd1:   fixed_char = 8'h48;   // 'H'
-			8'd2:   fixed_char = 8'h34;   // '4'
+			8'd2:   fixed_char = 8'h35;   // '5'（M5 版本标识；其余前缀与 M4 逐字节一致）
 			8'd3:   fixed_char = 8'h20;
 			8'd5:   fixed_char = 8'h20;
 			8'd6:   fixed_char = 8'h4E;   // 'N'
@@ -565,10 +622,29 @@ function[7:0] fixed_char;
 			8'd62:  fixed_char = 8'h4C;   // 'L'
 			8'd63:  fixed_char = 8'h3D;
 			8'd65:  fixed_char = 8'h20;
-			8'd66:  fixed_char = 8'h56;   // 'V'
-			8'd67:  fixed_char = 8'h3D;
-			8'd162: fixed_char = 8'h0D;   // CR
-			8'd163: fixed_char = 8'h0A;   // LF
+			// ---- M5 新字段（65..96，共 32 字节；M4 的 'V=' 从 66/67 挪到 95/96）----
+			8'd66:  fixed_char = 8'h54;   // 'T'
+			8'd67:  fixed_char = 8'h3D;   // '='
+			8'd69:  fixed_char = 8'h20;
+			8'd70:  fixed_char = 8'h51;   // 'Q'
+			8'd71:  fixed_char = 8'h3D;
+			8'd73:  fixed_char = 8'h20;
+			8'd74:  fixed_char = 8'h43;   // 'C'
+			8'd75:  fixed_char = 8'h3D;
+			8'd78:  fixed_char = 8'h20;
+			8'd79:  fixed_char = 8'h44;   // 'D'
+			8'd80:  fixed_char = 8'h3D;
+			8'd85:  fixed_char = 8'h20;
+			8'd86:  fixed_char = 8'h49;   // 'I'
+			8'd87:  fixed_char = 8'h3D;
+			8'd90:  fixed_char = 8'h20;
+			8'd91:  fixed_char = 8'h55;   // 'U'
+			8'd92:  fixed_char = 8'h3D;
+			8'd94:  fixed_char = 8'h20;
+			8'd95:  fixed_char = 8'h56;   // 'V'
+			8'd96:  fixed_char = 8'h3D;   // '='
+			8'd191: fixed_char = 8'h0D;   // CR
+			8'd192: fixed_char = 8'h0A;   // LF
 			default: fixed_char = 8'h00;  // 0x00 = 该位为动态字符
 		endcase
 	end
@@ -629,7 +705,31 @@ function[7:0] line_byte;
 		end
 		else if(i == 8'd64)                           // L = 1 hex（锁定）
 			line_byte = hexc({3'd0, prt_lock});
-		else if((i >= 8'd68) && (i <= 8'd161))        // 曲线：94 个 nibble
+		else if(i == 8'd68)                           // T = 1 hex（行为状态）
+			line_byte = hexc({1'b0, prt_st});
+		else if(i == 8'd72)                           // Q = 1 hex（建议模式）
+			line_byte = hexc({1'b0, prt_mode});
+		else if((i >= 8'd76) && (i <= 8'd77))         // C = 2 hex（置信度）
+		begin
+			nb = 4'd1 - (i - 8'd76);
+			vtmp = {24'd0, prt_conf};
+			line_byte = hexc(vtmp[nb*4 +: 4]);
+		end
+		else if((i >= 8'd81) && (i <= 8'd84))         // D = 4 hex（停留帧数）
+		begin
+			nb = 4'd3 - (i - 8'd81);
+			vtmp = {16'd0, prt_dwell};
+			line_byte = hexc(vtmp[nb*4 +: 4]);
+		end
+		else if((i >= 8'd88) && (i <= 8'd89))         // I = 2 hex（互动次数）
+		begin
+			nb = 4'd1 - (i - 8'd88);
+			vtmp = {24'd0, prt_icnt};
+			line_byte = hexc(vtmp[nb*4 +: 4]);
+		end
+		else if(i == 8'd93)                           // U = 1 hex（滤波后人数）
+			line_byte = hexc(prt_pplf);
+		else if((i >= `M5_CURVE_POS) && (i <= `M5_CURVE_END))   // 曲线：94 个 nibble
 			line_byte = hexc(curve_sh[3:0]);
 		else if(i == 8'd4)                            // 自检标志
 			line_byte = prt_ok ? 8'h4B : 8'h46;       // 'K' / 'F'
@@ -738,6 +838,12 @@ begin
 		prt_lock <= 1'b0;
 		prt_ok   <= 1'b0;
 		curve_sh <= {CURVE_W{1'b0}};
+		prt_st   <= 3'd0;
+		prt_mode <= 3'd0;
+		prt_conf <= 8'd0;
+		prt_dwell<= 16'd0;
+		prt_icnt <= 8'd0;
+		prt_pplf <= 4'd0;
 	end
 	else
 	begin
@@ -758,6 +864,13 @@ begin
 					prt_lock <= exp_locked_v;
 					prt_ok   <= cam_ok;
 					curve_sh <= snap_curve;   // 曲线的 94 个 nibble 一次性装填
+					// M5：状态机输出与快照同时锁存 → 整行自洽
+					prt_st   <= b_st;
+					prt_mode <= b_mode;
+					prt_conf <= b_conf;
+					prt_dwell<= b_dwell;
+					prt_icnt <= b_icnt;
+					prt_pplf <= b_pplf;
 					xpos     <= 8'd0;
 					xst      <= X_SEND;
 				end
@@ -773,7 +886,7 @@ begin
 					// 是从高位开始打包的，箱 0 就停在 bit[3:0]，所以这里是
 					// "先吐低位再右移"，输出顺序正好是箱 0、1、2…
 					// 反过来的话曲线会左右镜像，峰位全反（M3 的教训）。
-					if((xpos >= 8'd68) && (xpos <= 8'd161))
+					if((xpos >= `M5_CURVE_POS) && (xpos <= `M5_CURVE_END))
 						curve_sh <= {4'd0, curve_sh[CURVE_W-1:4]};
 					xst <= X_WAIT;
 				end
@@ -811,8 +924,10 @@ end
 //   led[0] = 配置序列完成
 //   led[1] = SCCB 自检通过
 //   led[2] = 0.5s 内有新帧
-//   led[3] = 曝光已锁定（连续 EXP_LOCK_FRAMES 帧落在死区内）
-//            —— M4 的核心验收证据；背景装载指示已由 M2 验收步骤覆盖
+//   led[3] = 曝光已锁定（M4 证据）
+//   M5 的验收证据是状态行里的 T=/Q=/C= 三个字段（"有人→T=2 C 上升"），
+//   板载 LED 只有 4 颗，M4 已经占满，故不新增——这也是"里程碑冻结"
+//   原则的体现：不为新里程碑去改旧里程碑的判读方式。
 // ------------------------------------------------------------
 reg[24:0] frm_wd;
 always@(posedge sys_clk or posedge rst_sys)
@@ -831,14 +946,16 @@ assign led[2] = (frm_wd < 25'd25000000);    // 0.5 s 内有帧 → 亮
 assign led[3] = exp_locked_v;               // 曝光收敛锁定 → 亮
 
 // ------------------------------------------------------------
-// 显式标记未使用的信号，避免综合告警（宽度 265 bit，逐项列全）
+// 显式标记未使用的信号，避免综合告警（宽度 271 bit，逐项列全）
 // ------------------------------------------------------------
-wire[264:0] unused_bus;
+wire[270:0] unused_bus;
 assign unused_bus = {sccb_nack, rx_data, rx_valid, wr_idx, err_cnt, cfg_busy,
                      f_sum, f_min, f_max, ver_rd, col_cnt, row_cnt,
                      frame_valid, line_start, frame_cnt, g_nz,
                      g_minx, g_maxx, g_miny, g_maxy, f_done_tog, g_done_tog,
                      s_cf, s_cl, s_cp, s_cpb, s_rf, s_rl, s_row_nz,
-                     exp_wr_cnt};
+                     exp_wr_cnt,
+                     // ---- M5：事件脉冲与方向留给 M6 的事件包，暂未消费 ----
+                     b_ev_enter, b_ev_leave, b_ev_interact, b_dir, b_push};
 
 endmodule
